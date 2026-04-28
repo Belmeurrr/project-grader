@@ -1,0 +1,57 @@
+# YOLOv11-seg fine-tune for card detection.
+#
+# Run from ml/:
+#   uv run python -m training.trainers.detection --config-name=detection
+#
+# The dataset path must point to a directory containing the standard
+# ultralytics YAML manifest (see ml/data/catalogs/detection_dataset.yaml).
+# The manifest is built by scrapers + labeling jobs in ml/data/.
+
+dataset:
+  manifest: ${oc.env:GRADER_DETECTION_DATASET,ml/data/catalogs/detection_dataset.yaml}
+  # Single class for v1: just "card". Multi-class (front/back/holder) comes
+  # in Stage 4 with the dedicated face classifier.
+  num_classes: 1
+  class_names: ["card"]
+
+model:
+  base: yolo11s-seg.pt   # small model; bumps to yolo11m-seg.pt if accuracy < target
+  image_size: 1024
+  pretrained: true
+
+train:
+  epochs: 80
+  batch_size: 16
+  workers: 8
+  patience: 15
+  optimizer: AdamW
+  lr0: 1.0e-3
+  lrf: 0.01      # cosine decay floor
+  weight_decay: 5.0e-4
+  cos_lr: true
+  close_mosaic: 10
+  amp: true
+  device: ${oc.env:GRADER_TRAIN_DEVICE,0}
+
+augment:
+  hsv_h: 0.015
+  hsv_s: 0.50
+  hsv_v: 0.30
+  degrees: 5.0
+  translate: 0.05
+  scale: 0.30
+  shear: 0.0
+  perspective: 0.0005
+  flipud: 0.0     # never vertical-flip a card
+  fliplr: 0.0     # never horizontal-flip a card; lefty/righty content matters
+  mosaic: 0.20
+  mixup: 0.0
+
+mlflow:
+  experiment: card-detection
+  run_name: ${now:%Y%m%d-%H%M%S}_yolo11s-seg
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,http://localhost:5000}
+
+output:
+  project: ${oc.env:GRADER_TRAIN_OUT,outputs/detection}
+  name: yolo11s-seg

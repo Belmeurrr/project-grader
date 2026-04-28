@@ -1,0 +1,77 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# build outputs
+.next/
+.turbo/
+out/
+*.tsbuildinfo
+
+# env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ml artifacts (use DVC)
+*.pt
+*.pth
+*.onnx
+*.mlmodel
+*.tflite
+mlruns/
+.dvc/cache/
+.dvc/tmp/
+
+# data (keep small fixtures, ignore everything else)
+ml/data/raw/
+ml/data/processed/
+ml/data/scraped/
+!ml/data/**/.gitkeep
+!ml/tests/fixtures/
+
+# logs
+logs/
+*.log
+
+# terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# docker
+.dockerignore.local
