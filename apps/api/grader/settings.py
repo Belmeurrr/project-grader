@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,66 @@ class Settings(BaseSettings):
 
     submission_max_image_bytes: int = 25 * 1024 * 1024
     submission_required_shots: int = 6
+
+    # ----- Auth (Clerk) -----
+    # The auth dependency supports two modes, switched via `dev_auth_enabled`:
+    #
+    # * Dev mode (default in env=dev): accepts `Authorization: Dev <clerk_id>`
+    #   and auto-creates a User on first sight. Keeps tests hermetic.
+    # * Prod mode: verifies an `Authorization: Bearer <jwt>` against Clerk's
+    #   JWKS, validates standard claims, and resolves/auto-creates a User
+    #   keyed on the JWT `sub`.
+    #
+    # In dev/staging/prod the default is computed from `env`, but every value
+    # is overridable via env var (e.g. `DEV_AUTH_ENABLED=true` in a staging
+    # box for debugging). Pydantic-settings loads env vars case-insensitively.
+    clerk_jwks_url: str | None = Field(
+        default=None,
+        description=(
+            "URL of the Clerk JWKS endpoint, e.g. "
+            "https://<your-instance>.clerk.accounts.dev/.well-known/jwks.json. "
+            "Required when `dev_auth_enabled` is False."
+        ),
+    )
+    clerk_issuer: str | None = Field(
+        default=None,
+        description=(
+            "Expected `iss` claim on Clerk JWTs, e.g. "
+            "https://<your-instance>.clerk.accounts.dev. Required in prod mode."
+        ),
+    )
+    clerk_audience: str | None = Field(
+        default=None,
+        description=(
+            "Expected `aud` claim. Optional — many Clerk setups omit `aud`. "
+            "When set, JWTs without a matching `aud` are rejected."
+        ),
+    )
+    dev_auth_enabled: bool | None = Field(
+        default=None,
+        description=(
+            "When True, accept `Authorization: Dev <token>` (auto-creates User). "
+            "When False, require a Clerk `Bearer <jwt>`. If unset, defaults to "
+            "True for env=dev and False otherwise."
+        ),
+    )
+    clerk_jwks_cache_ttl_seconds: int = Field(
+        default=300,
+        description=(
+            "TTL for the in-memory JWKS signing-key cache. Clerk rotates keys "
+            "rarely, so 5 minutes is a safe default; tune lower if you need "
+            "faster propagation after a key rotation."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _default_dev_auth_from_env(self) -> "Settings":
+        # Compute a sane default for `dev_auth_enabled` based on `env` when the
+        # operator has not pinned it explicitly. This is the "fail-closed in
+        # prod, fail-open in dev" rule.
+        if self.dev_auth_enabled is None:
+            object.__setattr__(self, "dev_auth_enabled", self.env == "dev")
+        return self
 
 
 @lru_cache(maxsize=1)

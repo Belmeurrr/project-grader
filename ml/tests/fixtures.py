@@ -229,3 +229,131 @@ def encode_jpeg(image: NDArray[np.uint8], quality: int = 92) -> bytes:
     if not ok:
         raise RuntimeError("jpeg encode failed")
     return buf.tobytes()
+
+
+# ---------------------------------------------------------------------------
+# Counterfeit / rosette fixtures
+# ---------------------------------------------------------------------------
+#
+# These produce canonical-shaped (750x1050) BGR uint8 cards with controlled
+# print-pattern characteristics. The halftone synthesizer paints a regular
+# dot grid in the inner area to mimic ~150 LPI offset print; the continuous
+# variant paints a smooth gradient with no spectral structure. They keep the
+# existing `(228, 228, 230)` border convention so other pipeline tests
+# (centering, edges) still see a recognizable border on these fixtures.
+
+
+def synth_halftone_card(
+    cell_size: int = 6,
+    jitter: float = 0.0,
+    dot_radius_ratio: float = 0.35,
+    border_color: tuple[int, int, int] = (228, 228, 230),
+    inner_color: tuple[int, int, int] = (210, 210, 215),
+    dot_color: tuple[int, int, int] = (40, 40, 60),
+    border_px: int = 40,
+    width: int = CARD_W,
+    height: int = CARD_H,
+    seed: int = 0,
+) -> NDArray[np.uint8]:
+    """Synthesize a card with a halftone-dot pattern in the inner area.
+
+    Mimics the ~150 LPI offset rosette pattern that authentic trading cards
+    print at. The dot grid produces ring-shaped peaks in the 2-D FFT
+    magnitude spectrum at radial frequency ≈ patch_size / cell_size — the
+    signal the print-rosette detector keys off.
+
+    Args:
+        cell_size: spacing between halftone-dot centers in pixels. Smaller
+            = higher print frequency. ~6 px ≈ 150 LPI at 300 dpi canonical.
+        jitter: per-cell random displacement std-dev in pixels. 0 produces
+            a perfectly periodic grid (strongest FFT peak); larger values
+            randomize the pattern and weaken the peak (used to test
+            monotonicity of the score with halftone clarity).
+        dot_radius_ratio: dot diameter as a fraction of cell_size. Default
+            0.35 puts ~35% of cell area in ink — typical of mid-tone offset.
+        inner_color: background of the inner area (where dots are painted).
+            Slightly off-white so dots have contrast even when border is
+            also light.
+        dot_color: dot fill color (BGR). Dark by default for high contrast.
+        border_color: same convention as `synth_card` so border-detection
+            and centering tests still see a clean white-ish border.
+        seed: jitter RNG seed.
+    """
+    rng = np.random.default_rng(seed)
+    canvas = np.full((height, width, 3), border_color, dtype=np.uint8)
+
+    inner_x0 = border_px
+    inner_y0 = border_px
+    inner_x1 = width - border_px
+    inner_y1 = height - border_px
+    if inner_x0 >= inner_x1 or inner_y0 >= inner_y1:
+        raise ValueError("border too thick — inner area would have nonpositive size")
+
+    canvas[inner_y0:inner_y1, inner_x0:inner_x1] = inner_color
+
+    dot_radius = max(1, int(round(cell_size * dot_radius_ratio)))
+    dot_color_bgr = (int(dot_color[0]), int(dot_color[1]), int(dot_color[2]))
+
+    # Step through the inner area on a regular grid; optionally jitter each
+    # dot center. cv2.circle with anti-aliasing (LINE_AA) gives smoother dots
+    # which better approximate halftone ink dots than aliased squares.
+    for cy in range(inner_y0 + cell_size // 2, inner_y1, cell_size):
+        for cx in range(inner_x0 + cell_size // 2, inner_x1, cell_size):
+            if jitter > 0:
+                dy = float(rng.normal(0.0, jitter))
+                dx = float(rng.normal(0.0, jitter))
+                py = int(round(cy + dy))
+                px = int(round(cx + dx))
+            else:
+                py, px = cy, cx
+            if (
+                inner_x0 <= px < inner_x1
+                and inner_y0 <= py < inner_y1
+            ):
+                cv2.circle(
+                    canvas,
+                    (px, py),
+                    dot_radius,
+                    dot_color_bgr,
+                    thickness=-1,
+                    lineType=cv2.LINE_AA,
+                )
+    return canvas
+
+
+def synth_continuous_tone_card(
+    border_color: tuple[int, int, int] = (228, 228, 230),
+    border_px: int = 40,
+    width: int = CARD_W,
+    height: int = CARD_H,
+    gradient_low: tuple[int, int, int] = (180, 160, 140),
+    gradient_high: tuple[int, int, int] = (110, 90, 70),
+) -> NDArray[np.uint8]:
+    """Synthesize a card with a smooth color gradient in the inner area.
+
+    Models a consumer-printer (inkjet) counterfeit: continuous-tone print
+    with no halftone structure → no FFT peak in the rosette band → low
+    rosette_score. Gradient is along the diagonal for non-trivial spatial
+    variation, but it's smooth enough to contain no high-frequency periodic
+    structure."""
+    canvas = np.full((height, width, 3), border_color, dtype=np.uint8)
+    inner_x0 = border_px
+    inner_y0 = border_px
+    inner_x1 = width - border_px
+    inner_y1 = height - border_px
+    if inner_x0 >= inner_x1 or inner_y0 >= inner_y1:
+        raise ValueError("border too thick — inner area would have nonpositive size")
+
+    inner_h = inner_y1 - inner_y0
+    inner_w = inner_x1 - inner_x0
+    # Diagonal gradient: blend factor t in [0, 1] across the inner-area diagonal.
+    yy, xx = np.indices((inner_h, inner_w), dtype=np.float32)
+    t = (yy / max(1, inner_h - 1) + xx / max(1, inner_w - 1)) / 2.0
+    t = t[..., None]  # (h, w, 1) for broadcasting
+
+    low = np.array(gradient_low, dtype=np.float32)
+    high = np.array(gradient_high, dtype=np.float32)
+    inner = ((1.0 - t) * low + t * high).astype(np.uint8)
+
+    canvas[inner_y0:inner_y1, inner_x0:inner_x1] = inner
+    return canvas
