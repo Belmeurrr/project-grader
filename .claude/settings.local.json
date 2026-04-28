@@ -6,7 +6,23 @@
       "Bash(python -c \"import yaml; print\\('yaml', yaml.__version__\\)\")",
       "Bash(PYTHONIOENCODING=utf-8 python _run_detection_tests.py)",
       "Bash(PYTHONIOENCODING=utf-8 python _run_identification_tests.py)",
-      "Bash(git init *)"
+      "Bash(git init *)",
+      "Bash(python -c \"import numpy; print\\(numpy.__version__\\)\")",
+      "Bash(python -c \"import jwt; print\\(jwt.__version__\\)\")",
+      "Bash(python -c \"import cv2; print\\(cv2.__version__\\)\")",
+      "Bash(python -c \"import scipy; print\\(scipy.__version__\\)\")",
+      "Bash(python -c \"from cryptography.hazmat.primitives.asymmetric import rsa; from cryptography.hazmat.primitives import serialization; print\\('crypto OK'\\)\")",
+      "Bash(python -c \"import structlog; print\\(structlog.__version__\\)\")",
+      "Bash(python -c \"import httpx; print\\(httpx.__version__\\)\")",
+      "Bash(python -c \"import boto3; print\\(boto3.__version__\\)\")",
+      "Bash(python _run_psa_scraper_tests.py)",
+      "Bash(python _run_rosette_tests.py)",
+      "Bash(python -c 'import ast; ast.parse\\(open\\(r'\\\\''__TRACKED_VAR__'\\\\''\\).read\\(\\)\\); print\\('\\\\''OK'\\\\'', r'\\\\''__TRACKED_VAR__'\\\\''\\)')",
+      "Bash(python _run_detection_tests.py)",
+      "Bash(python _run_identification_tests.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python _run_rosette_tests.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python _run_psa_scraper_tests.py)",
+      "Bash(xargs wc *)"
     ]
   }
 }
