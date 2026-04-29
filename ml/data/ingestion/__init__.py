@@ -1,13 +1,17 @@
 """Data ingestion pipelines.
 
 Public API for the PSA Public API client (primary), the deprecated
-pop-report scraper (kept for tests + storage compatibility), and the
-GitHub seed-corpus ingestor.
+pop-report scraper (kept for tests + storage compatibility), the
+GitHub seed-corpus ingestor, and the manufacturer reference image
+ingest (Scryfall today, PokemonTCG.io next).
 
 Eager-loaded surface (no httpx required):
-  - Storage classes / Protocol / shared dataclass:
+  - PSA storage classes / Protocol / shared dataclass:
       LocalScrapedRecordStore, S3ScrapedRecordStore, ScrapedRecordStore,
       ScrapedRecord
+  - Manufacturer reference storage:
+      LocalReferenceStore, ReferenceRecordStore, ReferenceRecord,
+      reference_image_relative_key
   - GitHub seed corpus (stdlib-only):
       SeedRecord, iter_seed_records, write_manifest
 
@@ -18,6 +22,10 @@ via PEP 562 __getattr__):
       PSA_PUBLIC_API_BASE_URL, ingest_cert, ingest_range
   - Deprecated httpx scraper (kept for tests + history):
       PSAPopScraper, ScrapeStats, parse_cert_html
+  - Scryfall reference ingest:
+      SCRYFALL_API_BASE_URL, ScryfallIngestStats,
+      iter_cards_for_query, ingest_card (Scryfall variant),
+      ingest_query
 
 This split lets a stdlib-only consumer (e.g. the github_seed manifest
 writer running in an environment without httpx) import the package
@@ -30,6 +38,12 @@ from data.ingestion.github_seed import (
     SeedRecord,
     iter_seed_records,
     write_manifest,
+)
+from data.ingestion.references_storage import (
+    LocalReferenceStore,
+    ReferenceRecord,
+    ReferenceRecordStore,
+    reference_image_relative_key,
 )
 from data.ingestion.storage import (
     LocalScrapedRecordStore,
@@ -57,6 +71,11 @@ _LAZY_NAMES: dict[str, str] = {
     "PSAPopScraper": "data.ingestion.psa_pop_scraper",
     "ScrapeStats": "data.ingestion.psa_pop_scraper",
     "parse_cert_html": "data.ingestion.psa_pop_scraper",
+    # Scryfall reference ingest
+    "SCRYFALL_API_BASE_URL": "data.ingestion.scryfall",
+    "ScryfallIngestStats": "data.ingestion.scryfall",
+    "iter_cards_for_query": "data.ingestion.scryfall",
+    "ingest_query": "data.ingestion.scryfall",
 }
 
 
@@ -74,11 +93,16 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # Storage (eager)
+    # PSA storage (eager)
     "LocalScrapedRecordStore",
     "S3ScrapedRecordStore",
     "ScrapedRecord",
     "ScrapedRecordStore",
+    # Manufacturer reference storage (eager)
+    "LocalReferenceStore",
+    "ReferenceRecord",
+    "ReferenceRecordStore",
+    "reference_image_relative_key",
     # GitHub seed corpus (eager, stdlib-only)
     "SeedRecord",
     "iter_seed_records",
@@ -95,4 +119,9 @@ __all__ = [
     "PSAPopScraper",
     "ScrapeStats",
     "parse_cert_html",
+    # Scryfall reference ingest (lazy — needs httpx)
+    "SCRYFALL_API_BASE_URL",
+    "ScryfallIngestStats",
+    "iter_cards_for_query",
+    "ingest_query",
 ]
