@@ -22,8 +22,16 @@ if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 
 from tests.fixtures import (  # noqa: E402
+    synth_card,
     synth_continuous_tone_card,
     synth_halftone_card,
+)
+from grader.db.models import AuthenticityVerdict  # noqa: E402
+from pipelines.counterfeit.color import (  # noqa: E402
+    ColorProfileMeasurement,
+)
+from pipelines.counterfeit.rosette import (  # noqa: E402
+    RosetteMeasurement,
 )
 
 
@@ -125,3 +133,92 @@ def test_analyze_rosette_raises_on_too_small_canonical(s3_bucket: str) -> None:
     _put_canonical(s3_bucket, key, tiny)
     with pytest.raises(counterfeit.CounterfeitFailedError):
         counterfeit.analyze_rosette(key)
+
+
+# -----------------------------
+# analyze_color_profile
+# -----------------------------
+
+
+def test_analyze_color_profile_saturated_canonical_scores_high(s3_bucket: str) -> None:
+    key = "test/canonical_saturated.png"
+    _put_canonical(s3_bucket, key, synth_card(image_color=(0, 0, 255)))
+
+    result = counterfeit.analyze_color_profile(key)
+    assert result.color_score >= 0.85
+    assert result.confidence > 0.0
+    assert result.manufacturer_profile == "generic"
+
+
+def test_analyze_color_profile_desaturated_canonical_scores_low(s3_bucket: str) -> None:
+    key = "test/canonical_desaturated.png"
+    _put_canonical(s3_bucket, key, synth_card(image_color=(140, 130, 120)))
+
+    result = counterfeit.analyze_color_profile(key)
+    assert result.color_score <= 0.20, (
+        f"desaturated canonical got score {result.color_score}; "
+        f"p95_chroma={result.p95_chroma}, conf={result.confidence}"
+    )
+
+
+def test_analyze_color_profile_raises_on_corrupt_bytes(s3_bucket: str) -> None:
+    key = "test/bad-color.png"
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=s3_bucket, Key=key, Body=b"not a png", ContentType="image/png"
+    )
+    with pytest.raises(counterfeit.CounterfeitFailedError, match="decode"):
+        counterfeit.analyze_color_profile(key)
+
+
+def test_analyze_color_profile_raises_on_too_small_canonical(s3_bucket: str) -> None:
+    key = "test/tiny-color.png"
+    tiny = np.zeros((50, 50, 3), dtype=np.uint8)
+    _put_canonical(s3_bucket, key, tiny)
+    with pytest.raises(counterfeit.CounterfeitFailedError):
+        counterfeit.analyze_color_profile(key)
+
+
+# -----------------------------
+# _combine_verdicts ensemble logic (pure function — no S3 needed)
+# -----------------------------
+
+
+def test_combine_verdicts_any_likely_counterfeit_wins() -> None:
+    """Conservative ensemble: a single LIKELY_COUNTERFEIT decides the
+    combined verdict regardless of what the other detectors say."""
+    AV = AuthenticityVerdict
+    # Even three AUTHENTICs can't override one LIKELY_COUNTERFEIT.
+    assert counterfeit._combine_verdicts(
+        [AV.LIKELY_COUNTERFEIT, AV.AUTHENTIC]
+    ) == AV.LIKELY_COUNTERFEIT
+    assert counterfeit._combine_verdicts(
+        [AV.AUTHENTIC, AV.AUTHENTIC, AV.LIKELY_COUNTERFEIT]
+    ) == AV.LIKELY_COUNTERFEIT
+
+
+def test_combine_verdicts_authentic_requires_consensus() -> None:
+    """AUTHENTIC only when ALL confident detectors agree on AUTHENTIC."""
+    AV = AuthenticityVerdict
+    assert counterfeit._combine_verdicts([AV.AUTHENTIC, AV.AUTHENTIC]) == AV.AUTHENTIC
+    # An UNVERIFIED detector should not block an authentic verdict if
+    # the other detectors are confident — the ensemble degrades.
+    assert counterfeit._combine_verdicts(
+        [AV.AUTHENTIC, AV.UNVERIFIED]
+    ) == AV.AUTHENTIC
+
+
+def test_combine_verdicts_suspicious_when_disagree() -> None:
+    AV = AuthenticityVerdict
+    assert counterfeit._combine_verdicts([AV.AUTHENTIC, AV.SUSPICIOUS]) == AV.SUSPICIOUS
+
+
+def test_combine_verdicts_all_unverified_returns_unverified() -> None:
+    AV = AuthenticityVerdict
+    assert counterfeit._combine_verdicts(
+        [AV.UNVERIFIED, AV.UNVERIFIED]
+    ) == AV.UNVERIFIED
+
+
+def test_combine_verdicts_empty_returns_unverified() -> None:
+    """Defensive: an empty verdict list (no detectors ran) is UNVERIFIED."""
+    assert counterfeit._combine_verdicts([]) == AuthenticityVerdict.UNVERIFIED

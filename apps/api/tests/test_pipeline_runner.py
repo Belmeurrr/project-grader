@@ -447,8 +447,17 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert grade is not None
     assert authenticity is not None
     assert authenticity.verdict in set(AuthenticityVerdict)
+    # Both detectors in the ensemble persist their raw outputs for
+    # offline recalibration. Pinning their presence at the top-level
+    # so a regression that drops a detector is loud.
     assert "rosette" in authenticity.detector_scores
+    assert "color" in authenticity.detector_scores
     assert "rosette" in authenticity.model_versions
+    assert "color" in authenticity.model_versions
+    # Per-detector verdicts are stored in the detector_scores blob so a
+    # later reviewer can see which detector pushed the combined verdict.
+    assert "verdict" in authenticity.detector_scores["rosette"]
+    assert "verdict" in authenticity.detector_scores["color"]
     assert 0.0 <= authenticity.confidence <= 1.0
 
 
@@ -482,8 +491,14 @@ async def test_pipeline_writes_counterfeit_audit_log_entries(
     if completed:
         payload = completed[0].payload
         assert "verdict" in payload
+        # Both detectors' top-line metrics are in the audit payload so
+        # an operator can grep history for "color_score < X" without
+        # joining against AuthenticityResult.
         assert "rosette_score" in payload
-        assert "confidence" in payload
+        assert "rosette_confidence" in payload
+        assert "color_score" in payload
+        assert "color_confidence" in payload
+        assert "combined_confidence" in payload
 
 
 @pytest.mark.asyncio

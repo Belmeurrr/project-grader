@@ -241,40 +241,102 @@ def _reasons_from_rosette(
     return reasons
 
 
+def _combine_verdicts(verdicts: list[AuthenticityVerdict]) -> AuthenticityVerdict:
+    """Conservative ensemble combiner.
+
+    Ranking, applied in order:
+      1. If ANY detector with sufficient confidence flags LIKELY_COUNTERFEIT,
+         the combined verdict is LIKELY_COUNTERFEIT. Counterfeit detection is
+         a high-precision-on-true-positives task; we'd rather flag a real
+         card for human review than pass a fake.
+      2. Else, count detectors that DID stake a verdict (i.e. weren't
+         UNVERIFIED).
+         - If none did, return UNVERIFIED — every detector abstained.
+         - If all confident detectors say AUTHENTIC, return AUTHENTIC
+           (consensus required for an authentic verdict).
+         - Otherwise some confident detector said SUSPICIOUS — return
+           SUSPICIOUS.
+    """
+    if not verdicts:
+        return AuthenticityVerdict.UNVERIFIED
+    if any(v == AuthenticityVerdict.LIKELY_COUNTERFEIT for v in verdicts):
+        return AuthenticityVerdict.LIKELY_COUNTERFEIT
+    confident = [v for v in verdicts if v != AuthenticityVerdict.UNVERIFIED]
+    if not confident:
+        return AuthenticityVerdict.UNVERIFIED
+    if all(v == AuthenticityVerdict.AUTHENTIC for v in confident):
+        return AuthenticityVerdict.AUTHENTIC
+    return AuthenticityVerdict.SUSPICIOUS
+
+
 async def persist_authenticity_result(
     submission_id: uuid.UUID,
-    result: RosetteMeasurement,
+    *,
+    rosette: RosetteMeasurement,
+    color: ColorProfileMeasurement,
     db: AsyncSession,
 ) -> AuthenticityResult:
     """Insert or update the AuthenticityResult row for a submission.
 
     A submission has at most one authenticity row (unique index on
     submission_id), so re-runs update in place rather than colliding on
-    the unique constraint. The verdict is derived from the rosette score
-    and detector confidence per the ROSETTE_* thresholds defined above.
+    the unique constraint.
 
-    The detector_scores blob carries the raw rosette outputs verbatim so
-    a future re-calibration can recompute verdicts from history without
-    re-running the FFT."""
-    verdict = _verdict_from_rosette(result)
+    Per-detector verdicts are computed by `_verdict_from_rosette` and
+    `_verdict_from_color_profile`; the combined row-level verdict comes
+    from `_combine_verdicts`. The combined `confidence` field is the
+    MIN of per-detector confidences — a single high-confidence detector
+    can flag a fake even if others abstain, but the row's confidence
+    only reflects "confident overall" when both detectors are confident.
+
+    The detector_scores blob carries each detector's raw outputs
+    verbatim so a future re-calibration can recompute verdicts from
+    history without re-running the math."""
+    rosette_verdict = _verdict_from_rosette(rosette)
+    color_verdict = _verdict_from_color_profile(color)
+    verdict = _combine_verdicts([rosette_verdict, color_verdict])
+
     detector_scores = {
         "rosette": {
-            "score": float(result.rosette_score),
-            "peak_strength": float(result.peak_strength),
-            "analyzed_patches": int(result.analyzed_patches),
-            "confidence": float(result.confidence),
-            "manufacturer_profile": result.manufacturer_profile,
-        }
-    }
-    reasons = _reasons_from_rosette(result, verdict)
-    model_versions = {
-        "rosette": ROSETTE_MODEL_VERSION,
-        "thresholds": {
-            "authentic": ROSETTE_AUTHENTIC_THRESHOLD,
-            "counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
-            "min_confidence": ROSETTE_MIN_CONFIDENCE,
+            "score": float(rosette.rosette_score),
+            "peak_strength": float(rosette.peak_strength),
+            "analyzed_patches": int(rosette.analyzed_patches),
+            "confidence": float(rosette.confidence),
+            "manufacturer_profile": rosette.manufacturer_profile,
+            "verdict": rosette_verdict.value,
+        },
+        "color": {
+            "score": float(color.color_score),
+            "p95_chroma": float(color.p95_chroma),
+            "border_white_bgr": list(color.border_white_bgr),
+            "border_stddev": float(color.border_stddev),
+            "gain_applied": list(color.gain_applied),
+            "confidence": float(color.confidence),
+            "manufacturer_profile": color.manufacturer_profile,
+            "verdict": color_verdict.value,
         },
     }
+    reasons: list[str] = []
+    reasons.extend(_reasons_from_rosette(rosette, rosette_verdict))
+    reasons.extend(_reasons_from_color_profile(color, color_verdict))
+
+    model_versions = {
+        "rosette": ROSETTE_MODEL_VERSION,
+        "color": COLOR_MODEL_VERSION,
+        "thresholds": {
+            "rosette_authentic": ROSETTE_AUTHENTIC_THRESHOLD,
+            "rosette_counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
+            "rosette_min_confidence": ROSETTE_MIN_CONFIDENCE,
+            "color_authentic": COLOR_AUTHENTIC_THRESHOLD,
+            "color_counterfeit": COLOR_COUNTERFEIT_THRESHOLD,
+            "color_min_confidence": COLOR_MIN_CONFIDENCE,
+        },
+    }
+
+    # Combined confidence: min across detectors. The row's "confidence"
+    # is what a downstream UI shows as "we're sure"; that should only
+    # be high when both detectors agree they have signal.
+    combined_confidence = float(min(rosette.confidence, color.confidence))
 
     existing = await db.scalar(
         select(AuthenticityResult).where(
@@ -285,7 +347,7 @@ async def persist_authenticity_result(
         row = AuthenticityResult(
             submission_id=submission_id,
             verdict=verdict,
-            confidence=float(result.confidence),
+            confidence=combined_confidence,
             detector_scores=detector_scores,
             reasons=reasons,
             model_versions=model_versions,
@@ -295,7 +357,7 @@ async def persist_authenticity_result(
         return row
 
     existing.verdict = verdict
-    existing.confidence = float(result.confidence)
+    existing.confidence = combined_confidence
     existing.detector_scores = detector_scores
     existing.reasons = reasons
     existing.model_versions = model_versions

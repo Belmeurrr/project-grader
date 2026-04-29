@@ -214,17 +214,20 @@ async def run_pipeline(
         # is handled inside identify_canonical_for_submission as a soft fail.
         return await _mark_failed(submission, db, f"identification_failed: {e}")
 
-    # Stage 3.5: counterfeit-authenticity check. Soft-fail: a detector
-    # blow-up should not block grading. The verdict (including UNVERIFIED on
-    # failure) is recorded so the cert page always has *some* authenticity
-    # row to display alongside the grade.
+    # Stage 3.5: counterfeit-authenticity check (FFT rosette + color profile,
+    # with combined verdict via _combine_verdicts in the service layer).
+    # Soft-fail: a detector blow-up should not block grading. The verdict
+    # (including UNVERIFIED on failure) is recorded so the cert page always
+    # has *some* authenticity row to display alongside the grade.
     db.add(_audit(submission.id, "pipeline.counterfeit.started", {}))
     await db.flush()
     try:
         rosette_measurement = counterfeit.analyze_rosette(front_canonical_key)
+        color_measurement = counterfeit.analyze_color_profile(front_canonical_key)
         authenticity = await counterfeit.persist_authenticity_result(
             submission_id=submission.id,
-            result=rosette_measurement,
+            rosette=rosette_measurement,
+            color=color_measurement,
             db=db,
         )
         db.add(
@@ -234,8 +237,14 @@ async def run_pipeline(
                 {
                     "verdict": authenticity.verdict.value,
                     "rosette_score": float(rosette_measurement.rosette_score),
-                    "confidence": float(rosette_measurement.confidence),
-                    "analyzed_patches": int(rosette_measurement.analyzed_patches),
+                    "rosette_confidence": float(rosette_measurement.confidence),
+                    "rosette_analyzed_patches": int(
+                        rosette_measurement.analyzed_patches
+                    ),
+                    "color_score": float(color_measurement.color_score),
+                    "color_confidence": float(color_measurement.confidence),
+                    "color_p95_chroma": float(color_measurement.p95_chroma),
+                    "combined_confidence": float(authenticity.confidence),
                 },
             )
         )
