@@ -39,12 +39,33 @@ import json
 import os
 import re
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Protocol, runtime_checkable
+from typing import Any, Iterable, Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    from data.ingestion.psa_pop_scraper import ScrapedRecord
+
+@dataclass(frozen=True)
+class ScrapedRecord:
+    """Single successfully-ingested cert. Persisted as one JSONL line.
+
+    Lives in storage.py so both the deprecated httpx scraper and the
+    PSA Public API client (which both feed the same JSONL store) can
+    import it without a circular dependency on each other. The shape
+    is intentionally narrow — one row per (cert, grade, optional
+    images) — and shared across data sources. New per-source fields
+    (e.g. PSA's Variety, population) live in source-specific extras
+    rather than expanding this dataclass."""
+
+    cert_id: int
+    grade: float
+    card_name: str
+    set_name: str
+    year: int | None
+    card_number: str | None
+    front_image_path: str | None
+    back_image_path: str | None
+    source_url: str
+    scraped_at: str  # ISO8601 UTC, includes "Z"
 
 
 _CONTENT_TYPE_TO_EXT = {
@@ -83,7 +104,7 @@ class ScrapedRecordStore(Protocol):
     backend. (If we later need parallelism, the obvious split is by cert_id
     range, with each shard writing its own JSONL file.)"""
 
-    def write_record(self, record: "ScrapedRecord") -> None:
+    def write_record(self, record: ScrapedRecord) -> None:
         """Append `record` durably. Must be atomic per-record."""
 
     def write_image(
@@ -151,7 +172,7 @@ class LocalScrapedRecordStore:
                     ids.add(cert_id)
         return ids
 
-    def write_record(self, record: "ScrapedRecord") -> None:
+    def write_record(self, record: ScrapedRecord) -> None:
         payload = json.dumps(asdict(record), ensure_ascii=False)
         with self._lock:
             with self._records_path.open("a", encoding="utf-8") as fh:
@@ -269,7 +290,7 @@ class S3ScrapedRecordStore:
             self._cert_ids_cache = self._scan_cert_ids()
         return self._cert_ids_cache
 
-    def write_record(self, record: "ScrapedRecord") -> None:
+    def write_record(self, record: ScrapedRecord) -> None:
         payload = json.dumps(asdict(record), ensure_ascii=False) + "\n"
         with self._lock:
             existing = self._read_existing_records_blob()
@@ -313,6 +334,7 @@ class S3ScrapedRecordStore:
 __all__ = [
     "LocalScrapedRecordStore",
     "S3ScrapedRecordStore",
+    "ScrapedRecord",
     "ScrapedRecordStore",
     "image_relative_key",
 ]

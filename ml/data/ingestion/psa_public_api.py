@@ -76,11 +76,21 @@ import httpx
 if TYPE_CHECKING:
     from data.ingestion.storage import ScrapedRecordStore
 
-# Reuse the scraper's record dataclass + abort exception unchanged.
-from data.ingestion.psa_pop_scraper import (
-    ScrapedRecord,
-    ScrapeAborted as IngestAborted,  # alias — same semantics, different track
-)
+# ScrapedRecord lives in the storage module so both ingest sources (the
+# deprecated httpx scraper and this API client) can share the dataclass
+# without cross-importing each other.
+from data.ingestion.storage import ScrapedRecord
+
+
+class IngestAborted(RuntimeError):
+    """Raised when the API ingest hits a fatal condition (auth error,
+    revoked token) that requires human attention rather than retry.
+
+    The daily script catches this and exits non-zero WITHOUT advancing
+    the state cursor — a token rotation doesn't lose its place in the
+    corpus. Distinct from the deprecated scraper's ScrapeAborted: same
+    semantics, but the two sources are entirely separate now and
+    catching one shouldn't accidentally swallow the other."""
 
 
 _logger = logging.getLogger("psa_public_api")

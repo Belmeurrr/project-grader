@@ -71,6 +71,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from data.ingestion.storage import ScrapedRecord  # canonical home of the dataclass
+
 if TYPE_CHECKING:
     from data.ingestion.storage import ScrapedRecordStore
 
@@ -127,22 +129,6 @@ PSA_CERT_BASE_URL = "https://www.psacard.com/cert/"
 
 class ScrapeAborted(RuntimeError):
     """Raised when the scraper hits a fatal condition (e.g. 403 block)."""
-
-
-@dataclass(frozen=True)
-class ScrapedRecord:
-    """Single successfully-parsed cert. Persisted as one JSONL line."""
-
-    cert_id: int
-    grade: float
-    card_name: str
-    set_name: str
-    year: int | None
-    card_number: str | None
-    front_image_path: str | None
-    back_image_path: str | None
-    source_url: str
-    scraped_at: str  # ISO8601 UTC, includes "Z"
 
 
 @dataclass

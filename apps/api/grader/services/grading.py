@@ -71,12 +71,15 @@ class GradingFailedError(Exception):
 
 
 def _load_canonical_bgr(s3_key: str) -> np.ndarray:
-    raw = storage.get_shot_bytes(s3_key)
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if image is None or image.size == 0:
-        raise GradingFailedError(f"could not decode canonical at {s3_key}")
-    return image
+    """Service-typed wrapper around storage.load_canonical_bgr.
+
+    Catches the storage-level CanonicalLoadError and re-raises as a
+    GradingFailedError so the worker can route load failures the same
+    as grading failures (same shape, same audit log entry path)."""
+    try:
+        return storage.load_canonical_bgr(s3_key)
+    except storage.CanonicalLoadError as e:
+        raise GradingFailedError(str(e)) from e
 
 
 def grade_centering(

@@ -90,19 +90,15 @@ class CounterfeitFailedError(Exception):
 
 
 def _load_canonical_bgr(s3_key: str) -> np.ndarray:
-    """Load and decode a canonical card image from S3.
+    """Service-typed wrapper around storage.load_canonical_bgr.
 
-    Duplicated from grader.services.grading._load_canonical_bgr to avoid
-    cross-service coupling — both modules want the same thing but neither
-    should be a transitive dependency of the other. If a third service
-    needs this, the function will be moved to grader.services.storage.
-    Until then, the duplication is cheap."""
-    raw = storage.get_shot_bytes(s3_key)
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if image is None or image.size == 0:
-        raise CounterfeitFailedError(f"could not decode canonical at {s3_key}")
-    return image
+    Catches the storage-level CanonicalLoadError and re-raises as a
+    CounterfeitFailedError so the worker can route load failures the
+    same as detector failures."""
+    try:
+        return storage.load_canonical_bgr(s3_key)
+    except storage.CanonicalLoadError as e:
+        raise CounterfeitFailedError(str(e)) from e
 
 
 def analyze_rosette(canonical_s3_key: str) -> RosetteMeasurement:

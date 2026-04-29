@@ -132,3 +132,33 @@ def get_shot_bytes(s3_key: str) -> bytes:
     settings = get_settings()
     obj = _s3_client().get_object(Bucket=settings.s3_bucket, Key=s3_key)
     return obj["Body"].read()
+
+
+class CanonicalLoadError(Exception):
+    """Raised when a canonical card image can't be loaded or decoded.
+
+    Distinct from any service-level error (e.g. GradingFailedError,
+    CounterfeitFailedError); each calling service should catch this
+    and re-raise as their own typed error so their callers can route
+    failures uniformly without learning about storage internals."""
+
+
+def load_canonical_bgr(s3_key: str):
+    """Load and decode a canonical card image from S3 → BGR ndarray.
+
+    Single home for what used to live duplicated in
+    grader.services.{grading,counterfeit} as `_load_canonical_bgr`.
+    Now there are three callers (grading + 2 counterfeit detectors)
+    and the duplication is no longer cheap.
+
+    cv2 + numpy are imported lazily so storage.py stays light when
+    callers only need the presigned-URL / bytes-fetch helpers."""
+    import cv2
+    import numpy as np
+
+    raw = get_shot_bytes(s3_key)
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        raise CanonicalLoadError(f"could not decode canonical at {s3_key}")
+    return image
