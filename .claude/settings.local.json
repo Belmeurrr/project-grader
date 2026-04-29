@@ -22,7 +22,8 @@
       "Bash(python _run_identification_tests.py)",
       "Bash(PYTHONIOENCODING=utf-8 python _run_rosette_tests.py)",
       "Bash(PYTHONIOENCODING=utf-8 python _run_psa_scraper_tests.py)",
-      "Bash(xargs wc *)"
+      "Bash(xargs wc *)",
+      "Bash(uv run *)"
     ]
   }
 }
