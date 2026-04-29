@@ -32,6 +32,10 @@ _ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 
+from pipelines.counterfeit.color import (  # noqa: E402
+    ColorProfileMeasurement,
+    measure_color_profile,
+)
 from pipelines.counterfeit.rosette import (  # noqa: E402
     RosetteMeasurement,
     measure_rosette,
@@ -55,6 +59,26 @@ ROSETTE_COUNTERFEIT_THRESHOLD: float = 0.35
 ROSETTE_MIN_CONFIDENCE: float = 0.4
 
 ROSETTE_MODEL_VERSION: str = "fft-v1"
+
+
+# Verdict thresholds for the color-profile detector. The score is a
+# logistic of the inner-area p95 chroma after white-balance calibration
+# (see ml/pipelines/counterfeit/color). Saturated authentic prints score
+# near 1.0; desaturated inkjet copies cluster around 0.05-0.20. Same
+# tri-state logic as rosette: AUTHENTIC above the high band, LIKELY_
+# COUNTERFEIT below the low band, SUSPICIOUS in the middle.
+#
+# v1 calibration is against synthetic fixtures. Real-card recalibration
+# tracked under "Counterfeit confidence calibration thresholds" in TODO.md.
+COLOR_AUTHENTIC_THRESHOLD: float = 0.65
+COLOR_COUNTERFEIT_THRESHOLD: float = 0.20
+
+# Detector confidence below which we won't stake a verdict — the
+# white-balance calibration was unreliable (border too tinted, too
+# noisy, or too dark) and the resulting chroma signal can't be trusted.
+COLOR_MIN_CONFIDENCE: float = 0.4
+
+COLOR_MODEL_VERSION: str = "cielab-chroma-v1"
 
 
 class CounterfeitFailedError(Exception):
@@ -108,6 +132,36 @@ def analyze_rosette(canonical_s3_key: str) -> RosetteMeasurement:
         ) from e
 
 
+def analyze_color_profile(canonical_s3_key: str) -> ColorProfileMeasurement:
+    """Run the CIELAB color-profile counterfeit detector on a canonical image.
+
+    Same shape as `analyze_rosette` so the pipeline runner can call both
+    in sequence and combine their measurements via the ensemble logic.
+    Authentic offset prints reach high CIELAB chroma in saturated art
+    areas; consumer-printer counterfeits clip at lower chroma. Border-
+    sampled white-balance calibration removes lighting cast as a
+    confounder.
+
+    Args:
+        canonical_s3_key: S3 key of the dewarped 750x1050 BGR canonical.
+
+    Returns:
+        ColorProfileMeasurement with a score in [0, 1] (higher = more
+        likely authentic) and a calibration-quality confidence in [0, 1].
+
+    Raises:
+        CounterfeitFailedError: if the canonical can't be loaded/decoded
+            or the image fails the detector's input-validation gate.
+    """
+    image = _load_canonical_bgr(canonical_s3_key)
+    try:
+        return measure_color_profile(image)
+    except ValueError as e:
+        raise CounterfeitFailedError(
+            f"color-profile analysis failed for {canonical_s3_key}: {e}"
+        ) from e
+
+
 def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
     if m.confidence < ROSETTE_MIN_CONFIDENCE:
         return AuthenticityVerdict.UNVERIFIED
@@ -116,6 +170,47 @@ def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
     if m.rosette_score < ROSETTE_COUNTERFEIT_THRESHOLD:
         return AuthenticityVerdict.LIKELY_COUNTERFEIT
     return AuthenticityVerdict.SUSPICIOUS
+
+
+def _verdict_from_color_profile(m: ColorProfileMeasurement) -> AuthenticityVerdict:
+    """Same tri-state logic as `_verdict_from_rosette` against the
+    color-detector thresholds. Kept symmetrical so the pipeline runner
+    can call both detectors and combine verdicts identically."""
+    if m.confidence < COLOR_MIN_CONFIDENCE:
+        return AuthenticityVerdict.UNVERIFIED
+    if m.color_score >= COLOR_AUTHENTIC_THRESHOLD:
+        return AuthenticityVerdict.AUTHENTIC
+    if m.color_score < COLOR_COUNTERFEIT_THRESHOLD:
+        return AuthenticityVerdict.LIKELY_COUNTERFEIT
+    return AuthenticityVerdict.SUSPICIOUS
+
+
+def _reasons_from_color_profile(
+    m: ColorProfileMeasurement, verdict: AuthenticityVerdict
+) -> list[str]:
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        reasons.append(
+            f"unreliable white-balance calibration "
+            f"(border_stddev={m.border_stddev:.1f}, confidence={m.confidence:.2f})"
+        )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"high chroma consistent with offset print "
+            f"(color_score={m.color_score:.2f}, p95_chroma={m.p95_chroma:.1f})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"low chroma — gamut clipping consistent with consumer printer "
+            f"(color_score={m.color_score:.2f}, p95_chroma={m.p95_chroma:.1f})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"borderline chroma — neither clearly offset nor inkjet "
+            f"(color_score={m.color_score:.2f}, p95_chroma={m.p95_chroma:.1f})"
+        )
+    return reasons
 
 
 def _reasons_from_rosette(
