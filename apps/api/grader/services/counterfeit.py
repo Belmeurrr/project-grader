@@ -9,21 +9,26 @@ authenticity ensemble (see docs/plans). v1 only implements the print-
 rosette FFT detector — additional detectors (color profile, typography,
 embedding anomaly, etc.) will land as siblings in this module.
 
-Persistence is intentionally NOT done here: the orchestrator
-(`grader.workers.pipeline_runner`) decides how to persist counterfeit
-results and is owned by another agent. This module only computes."""
+Persistence lives in `persist_authenticity_result`: turns a raw rosette
+measurement into a verdict and writes/updates the AuthenticityResult row
+keyed by submission_id. The orchestrator (`grader.workers.pipeline_runner`)
+calls `analyze_rosette` then `persist_authenticity_result`."""
 
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 
 import cv2
 import numpy as np
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from grader.db.models import AuthenticityResult, AuthenticityVerdict
 from grader.services import storage
 
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
+_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 
@@ -31,6 +36,25 @@ from pipelines.counterfeit.rosette import (  # noqa: E402
     RosetteMeasurement,
     measure_rosette,
 )
+
+
+# Verdict thresholds for the rosette detector. The score is a logistic of
+# the per-patch FFT-peak prominence (see ml/pipelines/counterfeit/rosette).
+# Continuous-tone counterfeits cluster around 0.05-0.15; clean offset-printed
+# authentics cluster around 0.95+. The middle band is genuine uncertainty —
+# we don't fabricate a verdict there.
+#
+# These v1 thresholds are calibrated against synthetic halftone fixtures.
+# Real cards may shift the operating point; recalibration is tracked under
+# "Counterfeit confidence calibration thresholds" in TODO.md.
+ROSETTE_AUTHENTIC_THRESHOLD: float = 0.65
+ROSETTE_COUNTERFEIT_THRESHOLD: float = 0.35
+
+# Detector confidence (= analyzed_patches / requested) below which we won't
+# stake a verdict — too few flat patches were found to trust the FFT signal.
+ROSETTE_MIN_CONFIDENCE: float = 0.4
+
+ROSETTE_MODEL_VERSION: str = "fft-v1"
 
 
 class CounterfeitFailedError(Exception):
@@ -82,3 +106,103 @@ def analyze_rosette(canonical_s3_key: str) -> RosetteMeasurement:
         raise CounterfeitFailedError(
             f"rosette analysis failed for {canonical_s3_key}: {e}"
         ) from e
+
+
+def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
+    if m.confidence < ROSETTE_MIN_CONFIDENCE:
+        return AuthenticityVerdict.UNVERIFIED
+    if m.rosette_score >= ROSETTE_AUTHENTIC_THRESHOLD:
+        return AuthenticityVerdict.AUTHENTIC
+    if m.rosette_score < ROSETTE_COUNTERFEIT_THRESHOLD:
+        return AuthenticityVerdict.LIKELY_COUNTERFEIT
+    return AuthenticityVerdict.SUSPICIOUS
+
+
+def _reasons_from_rosette(
+    m: RosetteMeasurement, verdict: AuthenticityVerdict
+) -> list[str]:
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        reasons.append(
+            f"insufficient flat regions for FFT analysis "
+            f"(analyzed_patches={m.analyzed_patches}, confidence={m.confidence:.2f})"
+        )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"halftone rosette pattern detected "
+            f"(rosette_score={m.rosette_score:.2f}, peak_strength={m.peak_strength:.2f})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"no halftone rosette pattern in expected band "
+            f"(rosette_score={m.rosette_score:.2f}, peak_strength={m.peak_strength:.2f})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"weak rosette signal — borderline halftone evidence "
+            f"(rosette_score={m.rosette_score:.2f}, peak_strength={m.peak_strength:.2f})"
+        )
+    return reasons
+
+
+async def persist_authenticity_result(
+    submission_id: uuid.UUID,
+    result: RosetteMeasurement,
+    db: AsyncSession,
+) -> AuthenticityResult:
+    """Insert or update the AuthenticityResult row for a submission.
+
+    A submission has at most one authenticity row (unique index on
+    submission_id), so re-runs update in place rather than colliding on
+    the unique constraint. The verdict is derived from the rosette score
+    and detector confidence per the ROSETTE_* thresholds defined above.
+
+    The detector_scores blob carries the raw rosette outputs verbatim so
+    a future re-calibration can recompute verdicts from history without
+    re-running the FFT."""
+    verdict = _verdict_from_rosette(result)
+    detector_scores = {
+        "rosette": {
+            "score": float(result.rosette_score),
+            "peak_strength": float(result.peak_strength),
+            "analyzed_patches": int(result.analyzed_patches),
+            "confidence": float(result.confidence),
+            "manufacturer_profile": result.manufacturer_profile,
+        }
+    }
+    reasons = _reasons_from_rosette(result, verdict)
+    model_versions = {
+        "rosette": ROSETTE_MODEL_VERSION,
+        "thresholds": {
+            "authentic": ROSETTE_AUTHENTIC_THRESHOLD,
+            "counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
+            "min_confidence": ROSETTE_MIN_CONFIDENCE,
+        },
+    }
+
+    existing = await db.scalar(
+        select(AuthenticityResult).where(
+            AuthenticityResult.submission_id == submission_id
+        )
+    )
+    if existing is None:
+        row = AuthenticityResult(
+            submission_id=submission_id,
+            verdict=verdict,
+            confidence=float(result.confidence),
+            detector_scores=detector_scores,
+            reasons=reasons,
+            model_versions=model_versions,
+        )
+        db.add(row)
+        await db.flush()
+        return row
+
+    existing.verdict = verdict
+    existing.confidence = float(result.confidence)
+    existing.detector_scores = detector_scores
+    existing.reasons = reasons
+    existing.model_versions = model_versions
+    await db.flush()
+    return existing

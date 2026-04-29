@@ -25,7 +25,7 @@ from grader.services import storage
 from grader.settings import get_settings
 
 # ml/ is sibling to apps/api; add to sys.path so pipelines.* resolves.
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
+_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 

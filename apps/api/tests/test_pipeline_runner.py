@@ -23,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from grader.db.models import (
     AuditLog,
+    AuthenticityResult,
+    AuthenticityVerdict,
     Grade,
     GradingScheme,
     ShotKind,
@@ -411,6 +413,106 @@ async def test_pipeline_edges_audit_log_includes_back_flag(
     assert log.payload["back_edges_used"] is True
     assert "edges" in log.payload
     assert "edges_worse_face" in log.payload
+
+
+# --------------------------------------------------------------------------
+# Counterfeit / authenticity integration
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pipeline_persists_grade_and_authenticity_result(
+    s3_bucket: str, db_session: AsyncSession
+) -> None:
+    """The headline end-to-end assertion: a successful submission produces
+    BOTH a Grade row AND an AuthenticityResult row. This is the contract
+    the cert page relies on."""
+    user = await _make_user(db_session)
+    sub = await _make_submission(db_session, user)
+    await _add_shot(db_session, sub.id, ShotKind.FRONT_FULL, s3_bucket, card_in_scene(fill=0.55))
+
+    result = await run_pipeline(
+        submission_id=sub.id, db=db_session,
+        catalog=_empty_catalog(), embedder=SimpleEmbedder(),
+    )
+    assert result.status == SubmissionStatus.COMPLETED
+
+    grade = await db_session.scalar(
+        select(Grade).where(Grade.submission_id == sub.id, Grade.scheme == GradingScheme.PSA)
+    )
+    authenticity = await db_session.scalar(
+        select(AuthenticityResult).where(AuthenticityResult.submission_id == sub.id)
+    )
+
+    assert grade is not None
+    assert authenticity is not None
+    assert authenticity.verdict in set(AuthenticityVerdict)
+    assert "rosette" in authenticity.detector_scores
+    assert "rosette" in authenticity.model_versions
+    assert 0.0 <= authenticity.confidence <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_writes_counterfeit_audit_log_entries(
+    s3_bucket: str, db_session: AsyncSession
+) -> None:
+    user = await _make_user(db_session)
+    sub = await _make_submission(db_session, user)
+    await _add_shot(db_session, sub.id, ShotKind.FRONT_FULL, s3_bucket, card_in_scene(fill=0.55))
+
+    await run_pipeline(
+        submission_id=sub.id, db=db_session,
+        catalog=_empty_catalog(), embedder=SimpleEmbedder(),
+    )
+
+    logs = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.submission_id == sub.id).order_by(AuditLog.created_at)
+        )
+    ).scalars().all()
+    actions = [log.action for log in logs]
+    assert "pipeline.counterfeit.started" in actions
+    # `.completed` on success, `.skipped` on detector-level failure — at
+    # least one terminal entry must follow `.started`.
+    assert ("pipeline.counterfeit.completed" in actions) or (
+        "pipeline.counterfeit.skipped" in actions
+    )
+
+    completed = [log for log in logs if log.action == "pipeline.counterfeit.completed"]
+    if completed:
+        payload = completed[0].payload
+        assert "verdict" in payload
+        assert "rosette_score" in payload
+        assert "confidence" in payload
+
+
+@pytest.mark.asyncio
+async def test_pipeline_authenticity_idempotent_on_re_run(
+    s3_bucket: str, db_session: AsyncSession
+) -> None:
+    """Re-running the pipeline updates the existing AuthenticityResult row
+    (unique index on submission_id) rather than colliding."""
+    user = await _make_user(db_session)
+    sub = await _make_submission(db_session, user)
+    await _add_shot(db_session, sub.id, ShotKind.FRONT_FULL, s3_bucket, card_in_scene(fill=0.55))
+
+    await run_pipeline(
+        submission_id=sub.id, db=db_session,
+        catalog=_empty_catalog(), embedder=SimpleEmbedder(),
+    )
+    sub.status = SubmissionStatus.CAPTURING  # reset to allow re-run
+    await db_session.flush()
+    await run_pipeline(
+        submission_id=sub.id, db=db_session,
+        catalog=_empty_catalog(), embedder=SimpleEmbedder(),
+    )
+
+    rows = (
+        await db_session.execute(
+            select(AuthenticityResult).where(AuthenticityResult.submission_id == sub.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1
 
 
 @pytest.mark.asyncio

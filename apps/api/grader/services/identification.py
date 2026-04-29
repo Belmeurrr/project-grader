@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from grader.db.models import AuditLog, Submission
 from grader.services import storage
 
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
+_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 

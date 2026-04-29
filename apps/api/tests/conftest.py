@@ -11,10 +11,9 @@ Required env (defaults assume the local docker-compose Postgres):
 
 from __future__ import annotations
 
-import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -35,11 +34,10 @@ def _test_database_url() -> str:
     )
 
 
-@pytest.fixture(scope="session")
-def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+# pytest-asyncio 1.x manages the event loop itself when
+# `asyncio_default_*_loop_scope` is configured in pyproject.toml. We no longer
+# define a custom `event_loop` fixture (which was the pytest-asyncio 0.x
+# pattern and is deprecated in 1.x).
 
 
 @pytest_asyncio.fixture(scope="session")

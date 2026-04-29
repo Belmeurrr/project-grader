@@ -30,7 +30,7 @@ from grader.services import storage
 # Pipelines are inside ml/, which is a separate package outside apps/api/.
 # In dev/test we add ml/ to sys.path; in prod the worker container bundles
 # ml/ via Docker COPY.
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
+_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 

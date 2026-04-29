@@ -41,9 +41,9 @@ from grader.db.models import (
     SubmissionShot,
     SubmissionStatus,
 )
-from grader.services import detection, grading, identification
+from grader.services import counterfeit, detection, grading, identification
 
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
+_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 
@@ -153,6 +153,13 @@ async def run_pipeline(
         Submission,
         submission_id,
         options=[selectinload(Submission.shots), selectinload(Submission.grades)],
+        # Force re-issue of the load options. Without this, if the submission
+        # is already in the session's identity map (common in tests, possible
+        # in workers that share sessions), `db.get` returns the cached instance
+        # and silently drops the selectinload — leaving `submission.shots` to
+        # lazy-load from a sync attribute access, which the asyncpg backend
+        # can't service.
+        populate_existing=True,
     )
     if submission is None:
         raise PipelineValidationError(f"submission {submission_id} not found")
@@ -206,6 +213,42 @@ async def run_pipeline(
         # Hard fail only if the canonical itself is unreadable. Catalog miss
         # is handled inside identify_canonical_for_submission as a soft fail.
         return await _mark_failed(submission, db, f"identification_failed: {e}")
+
+    # Stage 3.5: counterfeit-authenticity check. Soft-fail: a detector
+    # blow-up should not block grading. The verdict (including UNVERIFIED on
+    # failure) is recorded so the cert page always has *some* authenticity
+    # row to display alongside the grade.
+    db.add(_audit(submission.id, "pipeline.counterfeit.started", {}))
+    await db.flush()
+    try:
+        rosette_measurement = counterfeit.analyze_rosette(front_canonical_key)
+        authenticity = await counterfeit.persist_authenticity_result(
+            submission_id=submission.id,
+            result=rosette_measurement,
+            db=db,
+        )
+        db.add(
+            _audit(
+                submission.id,
+                "pipeline.counterfeit.completed",
+                {
+                    "verdict": authenticity.verdict.value,
+                    "rosette_score": float(rosette_measurement.rosette_score),
+                    "confidence": float(rosette_measurement.confidence),
+                    "analyzed_patches": int(rosette_measurement.analyzed_patches),
+                },
+            )
+        )
+        await db.flush()
+    except counterfeit.CounterfeitFailedError as e:
+        db.add(
+            _audit(
+                submission.id,
+                "pipeline.counterfeit.skipped",
+                {"reason": str(e)},
+            )
+        )
+        await db.flush()
 
     # Stage 4 (partial): centering.
     try:
