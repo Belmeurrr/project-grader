@@ -49,6 +49,9 @@ Thumbs.db
 mlruns/
 .dvc/cache/
 .dvc/tmp/
+# Hydra run dirs — every training run creates outputs/<date>/<time>/.hydra/...
+outputs/
+ml/outputs/
 
 # data (keep small fixtures, ignore everything else)
 ml/data/raw/

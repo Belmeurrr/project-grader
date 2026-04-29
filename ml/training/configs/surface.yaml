@@ -1,0 +1,83 @@
+# Surface-defect semantic-segmentation skeleton.
+#
+# Run from ml/:
+#   uv run python -m training.trainers.surface train.smoke_only=true train.epochs=1
+#
+# Reads scraped JSONL from PSA_INGEST_DATA_DIR (default ~/psa_data).
+# Per-pixel defect labels do NOT yet exist in the corpus, so the
+# dataset's `mask_loader` defaults to an all-background placeholder
+# (the trainer optimizes a degenerate loss against the bg class). The
+# placeholder is for plumbing-proof only — when real per-pixel labels
+# land, swap in a callable that returns the real mask for a given
+# record. See PSASurfaceDataset docs.
+
+dataset:
+  # JSONL produced by ml/data/ingestion/psa_public_api. Same path the
+  # corners trainer uses; the surface trainer reads the same records,
+  # only the dataset-side image-prep + label-generation differs.
+  jsonl: ${oc.env:PSA_INGEST_DATA_DIR,${oc.env:HOME}/psa_data}/scraped.jsonl
+  # Bail rather than train on too few examples. Same gate as corners;
+  # the surface model needs even more data than corners (segmentation
+  # has C × H × W parameters' worth of label per image vs. one scalar)
+  # but for the skeleton 200 is fine — smoke_only doesn't need
+  # convergence.
+  min_samples: 200
+  val_fraction: 0.20
+  # Grade range — records outside the band are dropped. Surface-defect
+  # severity correlates with overall grade (a 10 has minimal surface
+  # issues; a 1 has many), so we keep the full range during training.
+  grade_min: 1.0
+  grade_max: 10.0
+  # Reproducible split.
+  split_seed: 49374
+
+model:
+  # Per the architecture plan the long-term backbone is SegFormer-B3
+  # (Mix Transformer encoder + lightweight MLP decoder). timm doesn't
+  # ship a Mix Transformer at the time of skeleton commit, so we
+  # bootstrap on tf_efficientnetv2_s — same backbone the corners
+  # trainer uses, gives us multi-scale features via features_only=True.
+  # A SegFormer-style decoder (1×1 project → upsample → concat → 1×1
+  # to N_CLASSES) sits on top. Swap to mit_b3 when timm gets it
+  # without changing the decoder.
+  backbone: tf_efficientnetv2_s.in21k_ft_in1k
+  pretrained: true
+  # Decoder common-channel count. SegFormer uses 256 for B0/B1 and 768
+  # for B5; 256 is a sane mid-skeleton value.
+  decoder_channels: 256
+  # 384×384 input — larger than the 224 the corners trainer uses
+  # because segmentation benefits from spatial context. Still small
+  # enough to run smoke_only on CPU.
+  image_size: 384
+  # Number of defect classes. Index 0 is background; 1..6 are the
+  # real defect classes per the architecture plan.
+  defect_classes:
+    - background
+    - scratch
+    - print_line
+    - indentation
+    - stain
+    - paper_loss
+    - foil_scratch
+
+train:
+  epochs: 30
+  batch_size: 8
+  num_workers: 4
+  optimizer: AdamW
+  lr: 6.0e-5
+  weight_decay: 1.0e-4
+  lr_min: 1.0e-7
+  output_dir: ${oc.env:GRADER_TRAIN_OUT,outputs/surface}
+  # Device: CUDA index, "cpu", or "mps" for Apple Silicon.
+  device: ${oc.env:GRADER_TRAIN_DEVICE,cpu}
+  # If True, run a single mini-batch end-to-end without writing
+  # checkpoints — useful for proving the data pipeline plumbs through
+  # before committing to a long run.
+  smoke_only: false
+
+mlflow:
+  experiment: card-surface-segmentation
+  run_name: ${now:%Y%m%d-%H%M%S}_surface_skeleton
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,http://localhost:5000}
+  fail_on_tracking_error: false
