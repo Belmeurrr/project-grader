@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job for the daily PSA Public API ingest.
+
+  Install:
+    cp ml/scripts/com.projectgrader.psa-ingest.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.projectgrader.psa-ingest.plist
+
+  Trigger immediately (test):
+    launchctl start com.projectgrader.psa-ingest
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.projectgrader.psa-ingest.plist
+    rm ~/Library/LaunchAgents/com.projectgrader.psa-ingest.plist
+
+  Edit the four hardcoded paths below if you fork or relocate the project.
+  See ml/scripts/README.md for full setup including the .env file.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.projectgrader.psa-ingest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>bash</string>
+        <string>-c</string>
+        <string>cd /Users/danielbelmeur/Documents/Github/project-grader &amp;&amp; set -a &amp;&amp; [ -f .env ] &amp;&amp; source .env &amp;&amp; set +a; /usr/bin/python3 ml/scripts/psa_daily_ingest.py</string>
+    </array>
+
+    <!-- 09:00 local time daily. UTC midnight resets the PSA daily budget,
+         so any time after that works; 09:00 local gives you observable
+         output during the day. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Don't fire on first load — the first run should be deliberate
+         (`launchctl start ...`) so we can watch the logs. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danielbelmeur/psa_data/launchd.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/danielbelmeur/psa_data/launchd.stderr.log</string>
+</dict>
+</plist>
