@@ -2,6 +2,10 @@ from pipelines.counterfeit.color import (
     ColorProfileMeasurement,
     measure_color_profile,
 )
+from pipelines.counterfeit.embedding_anomaly import (
+    EmbeddingAnomalyMeasurement,
+    measure_embedding_anomaly,
+)
 from pipelines.counterfeit.rosette import (
     DEFAULT_FREQ_BAND,
     DEFAULT_INNER_INSET_PX,
@@ -20,4 +24,7 @@ __all__ = [
     # Color profile (CIELAB chroma + white-balance) — ensemble detector #4
     "ColorProfileMeasurement",
     "measure_color_profile",
+    # Embedding anomaly (cosine distance from authentic centroid) — #7
+    "EmbeddingAnomalyMeasurement",
+    "measure_embedding_anomaly",
 ]
