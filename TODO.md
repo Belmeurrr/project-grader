@@ -8,73 +8,61 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Now — do next (1 session each)
 
-> **Pivot recorded 2026-04-28, validated 2026-04-29**: The httpx PSA scraper is deprecated (PSA cert pages are Cloudflare-gated). PSA's official Public API is the sanctioned replacement; **client + parser are now scaffolded and verified against 4 real cert classes** (Pokemon Mint 9, baseball half-grade FR 1.5, baseball NM-MT 8, PSA/DNA Bonds autograph). 41 smoke checks pass. Modules at [ml/data/ingestion/psa_public_api.py](ml/data/ingestion/psa_public_api.py) and [ml/data/ingestion/github_seed.py](ml/data/ingestion/github_seed.py); a stdlib smoke runner at [ml/scripts/psa_one_cert_smoke.py](ml/scripts/psa_one_cert_smoke.py). All uncommitted.
+> **Status as of 2026-04-29**: The data flywheel is live (PSA Public API ingest running daily under launchd, ~30–50 cert triples/day). Counterfeit ensemble has 2/7 detectors wired (FFT + color); embedding-anomaly built but unwired pending per-variant reference data. Corners ML trainer skeleton in place pending corpus growth. Counterfeit benchmark harness running (`python -m evaluation.counterfeit_benchmark`).
 
-- [ ] **Add `httpx` to [ml/pyproject.toml](ml/pyproject.toml)**
-  - Currently imported by both `psa_pop_scraper.py` and `psa_public_api.py` but not declared
-  - Single line: add `"httpx>=0.27.0"` under `dependencies`
-  - Latent bug; surfaces the moment we run anything that imports the modules in a clean env
+- [ ] **Public cert page** — `/cert/[id]` route in apps/web
+  - Phase 1 MVP requirement (every grading produces a shareable URL)
+  - Frontend-only, no UX input required (data display, no user-input forms)
+  - Fetches Grade + AuthenticityResult for a submission, renders both detectors' scores + per-detector verdicts + combined verdict
+  - The first piece of the system someone can actually click through to see end-to-end output. Highest demoability per session.
 
-- [ ] **First end-to-end PSA Public API ingest run** (~10 certs)
-  - Pick 10 modern Pokemon cert IDs (post-Oct 2021 so they have images), e.g. 80000000–80000010 range
-  - Run `ingest_range(low, high, store=LocalScrapedRecordStore("/tmp/psa_data"))`
-  - Exercises: budget consumption + rollover, metadata fetch, dual-cert skip path, images fetch, image-bytes download to disk, ScrapedRecord JSONL write
-  - Expected outcome: `IngestStats.successful` ≥ 5, plus a few `not_found`/`dual_certs_skipped`/`images_missing` mixed in. ~10–20 of 100 daily API calls.
-  - Verify: `cat /tmp/psa_data/scraped.jsonl` has the records, `ls /tmp/psa_data/images/<cert>/{front,back}.jpg` for at least one cert.
+- [ ] **First real corners trainer run** (when corpus crosses 200 samples)
+  - At current ingest rate (~30-50/day), expected ~3-5 days from now
+  - `cd ml && uv run python -m training.trainers.corners train.smoke_only=true train.epochs=2`
+  - Goal: prove the data pipeline plumbs through to a torch step. NOT "model converges" (corpus too small).
+  - Expected: `dataset.min_samples=200` gate passes; one mini-batch flows through the EfficientNet-V2-S backbone; checkpoint written to `outputs/corners/best.pt`
+  - First useful val signal needs ~1k samples (~3-4 weeks at free-tier rate, OR email `webcert@collectors.com` for paid tier).
 
-- [ ] **First GitHub seed manifest write**
-  - `git clone https://github.com/samsilverman/PSA-Baseball-Grades /tmp/PSA-Baseball-Grades`
-  - In Python: `from data.ingestion.github_seed import write_manifest; write_manifest("/tmp/PSA-Baseball-Grades", "/tmp/seed_out")`
-  - Expected: `/tmp/seed_out/seed_manifest.jsonl` with 11,500 lines, 1,150 per grade
-  - Sanity check: `awk -F'"grade":' '{print $2}' /tmp/seed_out/seed_manifest.jsonl | cut -d, -f1 | sort | uniq -c`
-
-- [ ] **Commit the new ingestion modules**
-  - After both runs above succeed
-  - Single commit: `feat: PSA Public API client + GitHub seed corpus ingestor`
-  - Files: `ml/data/ingestion/psa_public_api.py`, `ml/data/ingestion/github_seed.py`, `ml/scripts/psa_one_cert_smoke.py`, `ml/pyproject.toml`, `docs/roadmap.md`, `TODO.md`
+- [ ] **Wire embedding-anomaly into pipeline_runner** (when per-variant reference exemplars exist)
+  - Pure function is committed at `ml/pipelines/counterfeit/embedding_anomaly/measure.py` — ready to use.
+  - Blocked on: per-variant authentic exemplars store. Two unblock paths:
+    1. **Manufacturer reference scraper output** (item below) — gives 1+ canonical refs per variant
+    2. **PSA ingest aggregation by SpecID** — once a variant accumulates ≥3 PSA-graded samples in our corpus, those are exemplars
+  - Once unblocked: c174171-shape commit. Add `analyze_embedding_anomaly` service wrapper, extend Stage 3.5 ensemble to 3 detectors.
 
 ---
 
 ## Soon — parallel-agent friendly (file-disjoint, no user input needed)
 
-- [ ] **Color profile counterfeit detector** (ensemble detector #4)
-  - New module: `ml/pipelines/counterfeit/color/measure.py`
-  - CIELAB histogram of card vs expected authentic distribution; white-border-calibrated to neutralize lighting cast
-  - Mirror module shape exactly from [ml/pipelines/counterfeit/rosette/measure.py](ml/pipelines/counterfeit/rosette/measure.py)
-  - Service wrapper in [apps/api/grader/services/counterfeit.py](apps/api/grader/services/counterfeit.py): `analyze_color_profile(canonical_s3_key) -> ColorMeasurement`
+- [ ] **Manufacturer reference image scraper** — try when off corporate network
+  - Sources: Scryfall bulk JSON (MTG, ~25k cards), PokemonTCG.io API (~16k cards). Both are TLS-reset by user's corporate network (verified 2026-04-29 — `Connection reset by peer` to api.scryfall.com + api.pokemontcg.io while github.com + api.psacard.com work fine; corporate SNI filtering of certain Cloudflare zones).
+  - Storage layout (planned): `~/manufacturer_refs/references.jsonl` + `images/<manufacturer>/<variant_id>/front.<ext>`. Disjoint from the PSA store.
+  - Output unblocks: embedding-anomaly wiring, siamese reference detector, substrate paper detector.
 
-- [ ] **Embedding anomaly counterfeit detector** (ensemble detector #7)
-  - New module: `ml/pipelines/counterfeit/embedding_anomaly/measure.py`
-  - Compare submitted card's identification embedding to the distribution among known authentics for that variant
-  - Flag cards in the 99th percentile of embedding distance from the variant's authentic centroid
-  - Depends on a populated catalog with multiple authentic examples per variant — degrades gracefully when only 1 example exists
+- [ ] **Surface ML model trainer skeleton**
+  - Mirror the corners trainer's pattern (commit 8ea54b4) for the surface-defect head
+  - PSASurfaceDataset reads scraped.jsonl, loads canonical, passes through a SegFormer-B3-style backbone (multi-class semantic segmentation)
+  - Same Hydra+MLflow shape as corners.py; same `min_samples` gate
+  - Real training is data-blocked (needs flash-shot data + per-defect-class labels); skeleton is autonomous
 
-- [ ] **Calendar-time PSA Public API ingestion** (after the first 10-cert run lands)
-  - Daily-budget run against a known-populated modern cert range (post-Oct 2021 for image coverage)
-  - Free tier ceiling: 100 calls/day → ~50 cert triples/day. Each cert = 1 metadata + (1 image OR 0 if dual-cert) = 1–2 budget units.
-  - Watch: `successful`, `not_found`, `dual_certs_skipped`, `images_missing`, `auth_errors`, `rate_limited`
-  - If volume becomes a bottleneck, email `webcert@collectors.com` for paid tier pricing
+- [ ] **DinoV2 fine-tune trainer skeleton for card identification**
+  - Currently using `facebook/dinov2-base` baseline embedder. Fine-tune scaffold goes in `ml/training/trainers/identification.py`
+  - Pattern: same Hydra+MLflow as detection.py + corners.py
+  - Triplet-loss objective on (anchor, positive, negative) sampled from the catalog
 
-- [ ] **Manufacturer reference image scraper** (second data track)
-  - Per-manufacturer authentic-card photos. Sources: Pokemon Company press kits, Topps press releases, Wizards (Scryfall already has high-res images)
-  - Reference data feeds the siamese, substrate, holographic detectors
-  - New module: `ml/data/ingestion/manufacturer_references.py`
-  - Can run in parallel with the PSA scrape; entirely disjoint storage
-
-- [ ] **Refactor `_load_canonical_bgr` into shared helper** (~6 lines duplicated)
-  - Currently in both `services/grading.py` and `services/counterfeit.py`
-  - Move to `services/_canonical.py` or just `services/storage.py`
-  - Update both callers
-  - Trivial; do when a 3rd detector arrives
+- [ ] **YOLOv11-seg fine-tune for card detection**
+  - Config + trainer already exist (commit 45fd695). Just needs a labeled dataset manifest at `ml/data/catalogs/detection_dataset.yaml`
+  - Manifest is built from labeled fixtures + (eventually) PSA images with bounding boxes
 
 ---
 
 ## Soon — needs your input (sit-with-me sessions)
 
-- [ ] **Web capture flow** — functional-only landing page
+- [ ] **Web capture flow** — functional-only capture pages
   - UX decisions: camera permissions flow, error states, retake handling, multi-shot wizard order
-  - Pages to build: `/grade` (capture), `/grade/[id]` (status + result), `/cert/[id]` (public cert page stub)
-  - The user said "no design polish yet" — but functional capture flow still has UX choices
+  - Pages to build: `/grade` (capture), `/grade/[id]` (status + in-progress)
+  - The user said "no design polish yet" — but the capture flow still has UX choices
+  - Pairs naturally with the public cert page (in "Now") since both touch apps/web
 
 - [ ] **Terraform dev environment**
   - File: `infra/terraform/envs/dev/main.tf`
@@ -87,19 +75,18 @@ Each item has enough context to pick it up cold without reloading session state.
   - Has GDPR/consent angle — worth a deliberate decision
   - One-line fix in `_get_or_create_user` in [services/auth.py](apps/api/grader/services/auth.py) once decided
 
-- [ ] **Counterfeit confidence calibration thresholds**
-  - Current FFT thresholds calibrated against *synthetic* halftone fixtures
-  - Real cards may need re-calibration; needs a small labeled set (synthetic + a handful of real authentics + known counterfeits)
-  - Once recalibrated, lock the thresholds and version them in the model_versions metadata
+- [ ] **Counterfeit confidence calibration thresholds** — both detectors
+  - All thresholds (rosette + color, in `ml/pipelines/counterfeit/ensemble.py`) are calibrated against *synthetic* fixtures
+  - Real cards may need re-calibration; needs a small labeled set (synthetic + real authentics from PSA ingest + known counterfeits)
+  - Once recalibrated, lock the thresholds and version them in `model_versions` metadata. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) is the regression gate.
 
 ---
 
-## Blocked on data (PSA scraper needs to run for weeks)
+## Blocked on data accumulation (PSA daily ingest is running)
 
-- [ ] **Corners ML model** — EfficientNet-V2-S backbone, 4 corner crops, ordinal regression head per corner. Final corner subgrade = min(4) per PSA. Needs labeled corner crops at scale.
-- [ ] **Surface ML model** — SegFormer-B3 multi-modal (no-flash + flash + optional tilt). Output mask per defect class {scratch, print_line, indentation, stain, paper_loss, foil_scratch}. Hardest model in the system.
-- [ ] **DinoV2 fine-tune for card identification** — replaces the public `facebook/dinov2-base` baseline with card-specific weights. Trainer scaffold goes in `ml/training/trainers/identification.py`.
-- [ ] **YOLOv11-seg fine-tune for card detection** — config already at [ml/training/configs/detection.yaml](ml/training/configs/detection.yaml); trainer at [ml/training/trainers/detection.py](ml/training/trainers/detection.py). Just needs a labeled dataset manifest.
+- [ ] **Corners ML model — real training** — Skeleton committed (8ea54b4). Refuses to train below 200 samples; expected to cross threshold ~3-5 days from 2026-04-29. First useful val signal needs ~1k samples.
+- [ ] **Surface ML model — real training** — Hardest model in the system. Needs flash-shot data (currently unavailable) + per-defect-class labels (currently unlabeled).
+- [ ] **DinoV2 / YOLOv11-seg fine-tunes** — Identification + detection both blocked on labeled-at-scale dataset manifests.
 
 ---
 
@@ -114,7 +101,6 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Later — Phase 1 MVP polish
 
-- [ ] **Public cert page** — every grading produces a shareable URL (`/cert/<submission_id>`); ISR-cacheable, SEO-indexable. Required for MVP per the plan.
 - [ ] **Stripe payments** — free 5/mo, $10/mo unlimited. Webhook handler for subscription lifecycle.
 - [ ] **TCGplayer pricing comps** — pull current market price on identified-variant. Show predicted-grade-adjusted EV (`Σ P(grade) × median_price(grade)`).
 - [ ] **MTG catalog ingestion** — Scryfall bulk JSON, daily refresh job
@@ -136,7 +122,7 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Operational hygiene (continuous)
 
-- [ ] Public accuracy benchmark — published monthly, predictions vs subsequent PSA grades. Per the trust strategy in the plan.
-- [ ] Counterfeit benchmark — curated test set (50 known authentics + 50 known counterfeits), refreshed quarterly. CI gate on recall ≥ 90% / FPR ≤ 2%.
-- [ ] Capture-guidance acceptance test — record real users with mid-range phones; measure rejection rate and retakes/submission. Target <2 retakes median.
-- [ ] Latency SLO monitoring — p95 ≤ 20s, p99 ≤ 35s (Datadog dashboards + PagerDuty alerts)
+- [x] **Counterfeit benchmark — v1 corpus + harness** (committed 6823e48). Run: `python -m evaluation.counterfeit_benchmark`. Current: 50-sample synthetic corpus, rosette 98% accuracy / color 100% / ensemble 98%. **Still TODO**: swap in real images as the corpus grows, then add the hard CI gate (recall ≥ 90% / FPR ≤ 2%).
+- [ ] Public accuracy benchmark — predictions vs subsequent PSA grades, published monthly (trust-strategy item from plan).
+- [ ] Capture-guidance acceptance test — real users on mid-range phones; rejection rate and retakes/submission. Target <2 retakes median.
+- [ ] Latency SLO monitoring — p95 ≤ 20s, p99 ≤ 35s (Datadog dashboards + PagerDuty alerts).
