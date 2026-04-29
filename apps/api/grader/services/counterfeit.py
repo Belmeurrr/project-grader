@@ -40,45 +40,20 @@ from pipelines.counterfeit.rosette import (  # noqa: E402
     RosetteMeasurement,
     measure_rosette,
 )
+from pipelines.counterfeit import ensemble  # noqa: E402
 
-
-# Verdict thresholds for the rosette detector. The score is a logistic of
-# the per-patch FFT-peak prominence (see ml/pipelines/counterfeit/rosette).
-# Continuous-tone counterfeits cluster around 0.05-0.15; clean offset-printed
-# authentics cluster around 0.95+. The middle band is genuine uncertainty —
-# we don't fabricate a verdict there.
-#
-# These v1 thresholds are calibrated against synthetic halftone fixtures.
-# Real cards may shift the operating point; recalibration is tracked under
-# "Counterfeit confidence calibration thresholds" in TODO.md.
-ROSETTE_AUTHENTIC_THRESHOLD: float = 0.65
-ROSETTE_COUNTERFEIT_THRESHOLD: float = 0.35
-
-# Detector confidence (= analyzed_patches / requested) below which we won't
-# stake a verdict — too few flat patches were found to trust the FFT signal.
-ROSETTE_MIN_CONFIDENCE: float = 0.4
-
-ROSETTE_MODEL_VERSION: str = "fft-v1"
-
-
-# Verdict thresholds for the color-profile detector. The score is a
-# logistic of the inner-area p95 chroma after white-balance calibration
-# (see ml/pipelines/counterfeit/color). Saturated authentic prints score
-# near 1.0; desaturated inkjet copies cluster around 0.05-0.20. Same
-# tri-state logic as rosette: AUTHENTIC above the high band, LIKELY_
-# COUNTERFEIT below the low band, SUSPICIOUS in the middle.
-#
-# v1 calibration is against synthetic fixtures. Real-card recalibration
-# tracked under "Counterfeit confidence calibration thresholds" in TODO.md.
-COLOR_AUTHENTIC_THRESHOLD: float = 0.65
-COLOR_COUNTERFEIT_THRESHOLD: float = 0.20
-
-# Detector confidence below which we won't stake a verdict — the
-# white-balance calibration was unreliable (border too tinted, too
-# noisy, or too dark) and the resulting chroma signal can't be trusted.
-COLOR_MIN_CONFIDENCE: float = 0.4
-
-COLOR_MODEL_VERSION: str = "cielab-chroma-v1"
+# Re-export thresholds + verdict logic from the ml-side ensemble module
+# so existing imports (tests, etc.) keep working without reaching into
+# pipelines.counterfeit.ensemble. Canonical home is the ml side; this
+# is the persistence-layer's local view.
+ROSETTE_AUTHENTIC_THRESHOLD = ensemble.ROSETTE_AUTHENTIC_THRESHOLD
+ROSETTE_COUNTERFEIT_THRESHOLD = ensemble.ROSETTE_COUNTERFEIT_THRESHOLD
+ROSETTE_MIN_CONFIDENCE = ensemble.ROSETTE_MIN_CONFIDENCE
+ROSETTE_MODEL_VERSION = ensemble.ROSETTE_MODEL_VERSION
+COLOR_AUTHENTIC_THRESHOLD = ensemble.COLOR_AUTHENTIC_THRESHOLD
+COLOR_COUNTERFEIT_THRESHOLD = ensemble.COLOR_COUNTERFEIT_THRESHOLD
+COLOR_MIN_CONFIDENCE = ensemble.COLOR_MIN_CONFIDENCE
+COLOR_MODEL_VERSION = ensemble.COLOR_MODEL_VERSION
 
 
 class CounterfeitFailedError(Exception):
@@ -159,26 +134,18 @@ def analyze_color_profile(canonical_s3_key: str) -> ColorProfileMeasurement:
 
 
 def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
-    if m.confidence < ROSETTE_MIN_CONFIDENCE:
-        return AuthenticityVerdict.UNVERIFIED
-    if m.rosette_score >= ROSETTE_AUTHENTIC_THRESHOLD:
-        return AuthenticityVerdict.AUTHENTIC
-    if m.rosette_score < ROSETTE_COUNTERFEIT_THRESHOLD:
-        return AuthenticityVerdict.LIKELY_COUNTERFEIT
-    return AuthenticityVerdict.SUSPICIOUS
+    """Translate the ml-side string verdict into the SQLAlchemy enum.
+
+    The decision logic + thresholds live in ml/pipelines/counterfeit/
+    ensemble.py (single home, shared with the benchmark). This wrapper
+    just maps "authentic" → AuthenticityVerdict.AUTHENTIC etc."""
+    return AuthenticityVerdict(ensemble.verdict_from_rosette(m))
 
 
 def _verdict_from_color_profile(m: ColorProfileMeasurement) -> AuthenticityVerdict:
-    """Same tri-state logic as `_verdict_from_rosette` against the
-    color-detector thresholds. Kept symmetrical so the pipeline runner
-    can call both detectors and combine verdicts identically."""
-    if m.confidence < COLOR_MIN_CONFIDENCE:
-        return AuthenticityVerdict.UNVERIFIED
-    if m.color_score >= COLOR_AUTHENTIC_THRESHOLD:
-        return AuthenticityVerdict.AUTHENTIC
-    if m.color_score < COLOR_COUNTERFEIT_THRESHOLD:
-        return AuthenticityVerdict.LIKELY_COUNTERFEIT
-    return AuthenticityVerdict.SUSPICIOUS
+    """Same shape as `_verdict_from_rosette` against the color-detector
+    thresholds. Decision logic in ml/pipelines/counterfeit/ensemble.py."""
+    return AuthenticityVerdict(ensemble.verdict_from_color_profile(m))
 
 
 def _reasons_from_color_profile(
@@ -238,31 +205,12 @@ def _reasons_from_rosette(
 
 
 def _combine_verdicts(verdicts: list[AuthenticityVerdict]) -> AuthenticityVerdict:
-    """Conservative ensemble combiner.
-
-    Ranking, applied in order:
-      1. If ANY detector with sufficient confidence flags LIKELY_COUNTERFEIT,
-         the combined verdict is LIKELY_COUNTERFEIT. Counterfeit detection is
-         a high-precision-on-true-positives task; we'd rather flag a real
-         card for human review than pass a fake.
-      2. Else, count detectors that DID stake a verdict (i.e. weren't
-         UNVERIFIED).
-         - If none did, return UNVERIFIED — every detector abstained.
-         - If all confident detectors say AUTHENTIC, return AUTHENTIC
-           (consensus required for an authentic verdict).
-         - Otherwise some confident detector said SUSPICIOUS — return
-           SUSPICIOUS.
-    """
-    if not verdicts:
-        return AuthenticityVerdict.UNVERIFIED
-    if any(v == AuthenticityVerdict.LIKELY_COUNTERFEIT for v in verdicts):
-        return AuthenticityVerdict.LIKELY_COUNTERFEIT
-    confident = [v for v in verdicts if v != AuthenticityVerdict.UNVERIFIED]
-    if not confident:
-        return AuthenticityVerdict.UNVERIFIED
-    if all(v == AuthenticityVerdict.AUTHENTIC for v in confident):
-        return AuthenticityVerdict.AUTHENTIC
-    return AuthenticityVerdict.SUSPICIOUS
+    """Conservative ensemble combiner. Decision logic in
+    ml/pipelines/counterfeit/ensemble.py (shared with the benchmark);
+    this wrapper handles the SQLAlchemy enum boundary."""
+    return AuthenticityVerdict(
+        ensemble.combine_verdicts(v.value for v in verdicts)
+    )
 
 
 async def persist_authenticity_result(
