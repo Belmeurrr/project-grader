@@ -8,18 +8,30 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Now — do next (1 session each)
 
-- [ ] **Wire FFT counterfeit detector into `pipeline_runner`**
-  - Add a counterfeit branch after detection+dewarp: call `services.counterfeit.analyze_rosette(front_canonical_s3_key)`
-  - New function `persist_authenticity_result(submission_id, result, db)` in [apps/api/grader/services/counterfeit.py](apps/api/grader/services/counterfeit.py) — writes the `authenticity_results` row using the existing schema
-  - New audit log entries: `pipeline.counterfeit.started`, `pipeline.counterfeit.completed`
-  - E2E test in [test_pipeline_runner.py](apps/api/tests/test_pipeline_runner.py): a submission produces *both* a Grade row AND an AuthenticityResult row
-  - Why first: this is the smallest change with the biggest demo value — the system finally outputs both differentiators (grade + authenticity) end-to-end
+> **Pivot recorded 2026-04-28, validated 2026-04-29**: The httpx PSA scraper is deprecated (PSA cert pages are Cloudflare-gated). PSA's official Public API is the sanctioned replacement; **client + parser are now scaffolded and verified against 4 real cert classes** (Pokemon Mint 9, baseball half-grade FR 1.5, baseball NM-MT 8, PSA/DNA Bonds autograph). 41 smoke checks pass. Modules at [ml/data/ingestion/psa_public_api.py](ml/data/ingestion/psa_public_api.py) and [ml/data/ingestion/github_seed.py](ml/data/ingestion/github_seed.py); a stdlib smoke runner at [ml/scripts/psa_one_cert_smoke.py](ml/scripts/psa_one_cert_smoke.py). All uncommitted.
 
-- [ ] **Validate PSA HTML assumptions against a real cert page**
-  - Fetch one cert page by hand (`https://www.psacard.com/cert/<some_known_cert_id>`)
-  - Compare structure to the parser assumptions documented in [ml/data/ingestion/psa_pop_scraper.py](ml/data/ingestion/psa_pop_scraper.py) docstring
-  - Adjust regex tuples at the top of the file if structure differs
-  - Why first: doing this *before* the calendar-time scrape kicks off saves wasted scraping if the parser is wrong
+- [ ] **Add `httpx` to [ml/pyproject.toml](ml/pyproject.toml)**
+  - Currently imported by both `psa_pop_scraper.py` and `psa_public_api.py` but not declared
+  - Single line: add `"httpx>=0.27.0"` under `dependencies`
+  - Latent bug; surfaces the moment we run anything that imports the modules in a clean env
+
+- [ ] **First end-to-end PSA Public API ingest run** (~10 certs)
+  - Pick 10 modern Pokemon cert IDs (post-Oct 2021 so they have images), e.g. 80000000–80000010 range
+  - Run `ingest_range(low, high, store=LocalScrapedRecordStore("/tmp/psa_data"))`
+  - Exercises: budget consumption + rollover, metadata fetch, dual-cert skip path, images fetch, image-bytes download to disk, ScrapedRecord JSONL write
+  - Expected outcome: `IngestStats.successful` ≥ 5, plus a few `not_found`/`dual_certs_skipped`/`images_missing` mixed in. ~10–20 of 100 daily API calls.
+  - Verify: `cat /tmp/psa_data/scraped.jsonl` has the records, `ls /tmp/psa_data/images/<cert>/{front,back}.jpg` for at least one cert.
+
+- [ ] **First GitHub seed manifest write**
+  - `git clone https://github.com/samsilverman/PSA-Baseball-Grades /tmp/PSA-Baseball-Grades`
+  - In Python: `from data.ingestion.github_seed import write_manifest; write_manifest("/tmp/PSA-Baseball-Grades", "/tmp/seed_out")`
+  - Expected: `/tmp/seed_out/seed_manifest.jsonl` with 11,500 lines, 1,150 per grade
+  - Sanity check: `awk -F'"grade":' '{print $2}' /tmp/seed_out/seed_manifest.jsonl | cut -d, -f1 | sort | uniq -c`
+
+- [ ] **Commit the new ingestion modules**
+  - After both runs above succeed
+  - Single commit: `feat: PSA Public API client + GitHub seed corpus ingestor`
+  - Files: `ml/data/ingestion/psa_public_api.py`, `ml/data/ingestion/github_seed.py`, `ml/scripts/psa_one_cert_smoke.py`, `ml/pyproject.toml`, `docs/roadmap.md`, `TODO.md`
 
 ---
 
@@ -37,12 +49,11 @@ Each item has enough context to pick it up cold without reloading session state.
   - Flag cards in the 99th percentile of embedding distance from the variant's authentic centroid
   - Depends on a populated catalog with multiple authentic examples per variant — degrades gracefully when only 1 example exists
 
-- [ ] **Run PSA scraper against real cert range** (calendar-time)
-  - Build is done; just needs to actually run
-  - Recommend small slice first: pick 10,000 cert IDs in some narrow range (e.g., a known set's range), validate output, then expand
-  - Output: S3 bucket prefix or local disk
-  - Default rate limit (1 req/sec) + jitter — let it run for days
-  - Watch the stats: `successful`, `not_found`, `parse_errors`, `rate_limited`. If `parse_errors > 5%` of `successful`, the parser needs fixing before going wider
+- [ ] **Calendar-time PSA Public API ingestion** (after the first 10-cert run lands)
+  - Daily-budget run against a known-populated modern cert range (post-Oct 2021 for image coverage)
+  - Free tier ceiling: 100 calls/day → ~50 cert triples/day. Each cert = 1 metadata + (1 image OR 0 if dual-cert) = 1–2 budget units.
+  - Watch: `successful`, `not_found`, `dual_certs_skipped`, `images_missing`, `auth_errors`, `rate_limited`
+  - If volume becomes a bottleneck, email `webcert@collectors.com` for paid tier pricing
 
 - [ ] **Manufacturer reference image scraper** (second data track)
   - Per-manufacturer authentic-card photos. Sources: Pokemon Company press kits, Topps press releases, Wizards (Scryfall already has high-res images)
