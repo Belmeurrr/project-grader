@@ -1,0 +1,63 @@
+# EfficientNet-V2-S corner-grading regression head.
+#
+# Run from ml/:
+#   uv run python -m training.trainers.corners
+#
+# Reads scraped JSONL from PSA_INGEST_DATA_DIR (default ~/psa_data).
+# Early in the data flywheel the corpus is tiny — the trainer will
+# refuse to start if there are fewer than `dataset.min_samples` rows
+# (default 200) so the loss-curve isn't a NaN swamp from day one.
+
+dataset:
+  # JSONL produced by ml/data/ingestion/psa_public_api. Defaults to
+  # the launchd job's data dir; override for ad-hoc runs.
+  jsonl: ${oc.env:PSA_INGEST_DATA_DIR,${oc.env:HOME}/psa_data}/scraped.jsonl
+  # Bail rather than train on too few examples.
+  min_samples: 200
+  val_fraction: 0.20
+  # Grade range — corner grades outside this band are dropped.
+  grade_min: 1.0
+  grade_max: 10.0
+  # Reproducible split.
+  split_seed: 49374
+
+model:
+  # EfficientNet-V2-S backbone via timm. Output: scalar grade ∈ [1, 10].
+  # Rationale per the architecture plan — small enough to run on a
+  # single mid-tier GPU, expressive enough for fine-grained corner
+  # texture features.
+  backbone: tf_efficientnetv2_s.in21k_ft_in1k
+  pretrained: true
+  # 224×224 matches ImageNet pretraining; cards are 750×1050 canonical
+  # so a 224 corner crop is ~30% of the smaller dimension — the
+  # tip-of-the-corner region PSA actually grades.
+  image_size: 224
+  # Regression head dimensions (Linear(N_features -> hidden -> 1)).
+  head_hidden: 256
+  head_dropout: 0.20
+
+train:
+  epochs: 30
+  batch_size: 64
+  num_workers: 4
+  optimizer: AdamW
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  # Cosine LR decay floor.
+  lr_min: 1.0e-6
+  # Where to write checkpoints + the final weights.
+  output_dir: ${oc.env:GRADER_TRAIN_OUT,outputs/corners}
+  # Device: CUDA index, "cpu", or "mps" for Apple Silicon.
+  device: ${oc.env:GRADER_TRAIN_DEVICE,cpu}
+  # If True, run a single mini-batch end-to-end without writing
+  # checkpoints — useful for proving the data pipeline plumbs through
+  # before committing to a long run.
+  smoke_only: false
+
+mlflow:
+  experiment: card-corners-grading
+  run_name: ${now:%Y%m%d-%H%M%S}_efficientnetv2s
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,http://localhost:5000}
+  # Ingestion logs MLflow tracking errors as warnings rather than hard
+  # failing — useful for first runs before MLflow is set up.
+  fail_on_tracking_error: false
