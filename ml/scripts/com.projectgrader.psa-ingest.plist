@@ -27,7 +27,7 @@
         <string>/usr/bin/env</string>
         <string>bash</string>
         <string>-c</string>
-        <string>cd /Users/danielbelmeur/Documents/Github/project-grader &amp;&amp; set -a &amp;&amp; [ -f .env ] &amp;&amp; source .env &amp;&amp; set +a; /usr/bin/python3 ml/scripts/psa_daily_ingest.py</string>
+        <string>cd /Users/danielbelmeur/Github/project-grader &amp;&amp; set -a &amp;&amp; [ -f .env ] &amp;&amp; source .env &amp;&amp; set +a; /usr/bin/python3 ml/scripts/psa_daily_ingest.py</string>
     </array>
 
     <!-- 09:00 local time daily. UTC midnight resets the PSA daily budget,

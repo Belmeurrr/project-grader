@@ -11,12 +11,12 @@ Drives one day's worth of PSA cert ingestion against the free-tier 100-call/day 
 1. Create a project-root `.env` (already gitignored — see [.gitignore](../../.gitignore)):
 
    ```sh
-   cat > /Users/danielbelmeur/Documents/Github/project-grader/.env <<EOF
+   cat > /Users/danielbelmeur/Github/project-grader/.env <<EOF
    PSA_PUBLIC_API_TOKEN=your-token-here
    PSA_INGEST_DATA_DIR=$HOME/psa_data
    PSA_INGEST_START_CERT_ID=80000010
    EOF
-   chmod 600 /Users/danielbelmeur/Documents/Github/project-grader/.env
+   chmod 600 /Users/danielbelmeur/Github/project-grader/.env
    ```
 
    Token is obtained at [psacard.com/publicapi](https://www.psacard.com/publicapi) (self-serve, free tier = 100 calls/day).
