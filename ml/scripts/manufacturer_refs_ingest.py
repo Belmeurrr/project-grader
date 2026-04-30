@@ -18,10 +18,22 @@ Usage:
     python -m scripts.manufacturer_refs_ingest --query "set:lea"
     python -m scripts.manufacturer_refs_ingest --source pokemon --query "set.id:base1"
     python -m scripts.manufacturer_refs_ingest --source pokemon --query "set.id:swsh1" --max-cards 10
+    python -m scripts.manufacturer_refs_ingest --bulk            # full MTG catalog via /bulk-data
+    python -m scripts.manufacturer_refs_ingest --bulk --max-cards 50 --keep-bulk-cache
 
 Configuration:
     --source STR          One of {mtg, pokemon}. Default: mtg.
-    --query STR           Source-specific search syntax.
+    --query STR           Source-specific search syntax. Required unless
+                          --bulk is set.
+    --bulk                Use Scryfall's /bulk-data endpoint instead of
+                          /cards/search. Downloads the full default_cards
+                          dump (~300 MB) in one shot. mtg only. --query
+                          is ignored when --bulk is set.
+    --bulk-cache-dir PATH Where to cache the downloaded bulk file.
+                          Default: a per-process subdir of the system
+                          temp dir.
+    --keep-bulk-cache     Keep the downloaded bulk file after ingest
+                          completes (default: removed).
     --data-dir PATH       Where to write references.jsonl + images.
                           Default: $MANUFACTURER_REFS_DATA_DIR or
                           ~/manufacturer_refs
@@ -93,11 +105,37 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--query",
-        required=True,
+        required=False,
+        default=None,
         help=(
             "Source-specific search syntax. Scryfall: e.g. 'set:lea', "
             "'set:m21 r:rare'. PokemonTCG.io (Lucene): e.g. 'set.id:base1', "
-            "'rarity:Rare'."
+            "'rarity:Rare'. Required unless --bulk is set."
+        ),
+    )
+    p.add_argument(
+        "--bulk",
+        action="store_true",
+        help=(
+            "Use Scryfall's /bulk-data endpoint (corpus-scale ingest of "
+            "the full default_cards dump). mtg only; --query is ignored."
+        ),
+    )
+    p.add_argument(
+        "--bulk-cache-dir",
+        default=None,
+        help=(
+            "Where to cache the downloaded bulk file (only meaningful with "
+            "--bulk). Defaults to a per-process subdir of the system temp dir."
+        ),
+    )
+    p.add_argument(
+        "--keep-bulk-cache",
+        action="store_true",
+        help=(
+            "Keep the downloaded bulk file after ingest completes (default: "
+            "removed). Useful for inspection or for re-running ingest "
+            "without re-downloading."
         ),
     )
     p.add_argument(
@@ -121,19 +159,49 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _dispatch_ingest(source: str):
-    """Resolve the (ingest_query_callable, stats_factory) pair for a
-    source. Submodule imports are deferred to here so the CLI --help
-    output doesn't pay for httpx."""
-    if source == "mtg":
+def _run_ingest(args, store):
+    """Dispatch the right ingest call for the requested source/mode.
+
+    Submodule imports are deferred to here so the CLI --help output
+    doesn't pay for httpx. Returns the stats dataclass returned by the
+    underlying ingest function."""
+    user_agent_kwargs: dict = {}
+    if args.user_agent:
+        user_agent_kwargs["user_agent"] = args.user_agent
+
+    if args.bulk:
+        # mtg-only validated upstream in main(). Bulk has no query and
+        # no per-source stats variation — Scryfall is the only catalog
+        # exposing a public bulk-data dump in this shape.
+        from data.ingestion import scryfall_bulk
+
+        return scryfall_bulk.ingest_bulk(
+            store=store,
+            cache_dir=args.bulk_cache_dir,
+            keep_cache=args.keep_bulk_cache,
+            max_cards=args.max_cards,
+            **user_agent_kwargs,
+        )
+
+    if args.source == "mtg":
         from data.ingestion import scryfall
 
-        return scryfall.ingest_query, scryfall.ScryfallIngestStats
-    if source == "pokemon":
+        return scryfall.ingest_query(
+            args.query,
+            store=store,
+            max_cards=args.max_cards,
+            **user_agent_kwargs,
+        )
+    if args.source == "pokemon":
         from data.ingestion import pokemontcg
 
-        return pokemontcg.ingest_query, pokemontcg.PokemonTCGIngestStats
-    raise ValueError(f"unknown source: {source!r}")  # unreachable: argparse gates this
+        return pokemontcg.ingest_query(
+            args.query,
+            store=store,
+            max_cards=args.max_cards,
+            **user_agent_kwargs,
+        )
+    raise ValueError(f"unknown source: {args.source!r}")  # unreachable: argparse gates this
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,37 +213,40 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
+    # Argument validation that argparse can't express directly.
+    if args.bulk:
+        if args.source != "mtg":
+            parser.error("--bulk is only supported with --source mtg")
+        if args.query:
+            _logger.warning("--query is ignored when --bulk is set")
+    else:
+        if not args.query:
+            parser.error("--query is required unless --bulk is set")
+
     data_dir = Path(args.data_dir)
     log_path = data_dir / "ingest_log.jsonl"
 
+    mode = "bulk" if args.bulk else "query"
     _logger.info(
-        "starting ingest source=%s data_dir=%s query=%r max_cards=%s",
+        "starting ingest source=%s mode=%s data_dir=%s query=%r max_cards=%s",
         args.source,
+        mode,
         data_dir,
         args.query,
         args.max_cards,
     )
 
     store = LocalReferenceStore(data_dir)
-    ingest_fn, _stats_cls = _dispatch_ingest(args.source)
-
-    kwargs: dict = {}
-    if args.user_agent:
-        kwargs["user_agent"] = args.user_agent
 
     try:
-        stats = ingest_fn(
-            args.query,
-            store=store,
-            max_cards=args.max_cards,
-            **kwargs,
-        )
+        stats = _run_ingest(args, store)
     except Exception as e:  # noqa: BLE001 — log and exit 1 on anything
         _append_log(
             log_path,
             {
                 "timestamp": _now_iso(),
                 "source": args.source,
+                "mode": mode,
                 "query": args.query,
                 "outcome": "error",
                 "error": str(e),
@@ -190,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         {
             "timestamp": _now_iso(),
             "source": args.source,
+            "mode": mode,
             "query": args.query,
             "outcome": "ok",
             "stats": asdict(stats),
@@ -197,8 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     _logger.info(
-        "ingest done source=%s query=%r stats=%s",
+        "ingest done source=%s mode=%s query=%r stats=%s",
         args.source,
+        mode,
         args.query,
         asdict(stats),
     )

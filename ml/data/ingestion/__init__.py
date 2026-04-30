@@ -28,6 +28,8 @@ via PEP 562 __getattr__):
       (these names are the Scryfall variant — for the PokemonTCG.io
       variant import the submodule directly:
        `from data.ingestion import pokemontcg`)
+  - Scryfall bulk-data ingest (corpus-scale alternative to ingest_query):
+      DEFAULT_BULK_TYPE, ingest_bulk
   - PokemonTCG.io reference ingest (top-level surface):
       POKEMONTCG_API_BASE_URL, PokemonTCGIngestStats
 
@@ -84,6 +86,9 @@ _LAZY_NAMES: dict[str, str] = {
     "ScryfallIngestStats": "data.ingestion.scryfall",
     "iter_cards_for_query": "data.ingestion.scryfall",
     "ingest_query": "data.ingestion.scryfall",
+    # Scryfall bulk-data ingest (corpus-scale)
+    "DEFAULT_BULK_TYPE": "data.ingestion.scryfall_bulk",
+    "ingest_bulk": "data.ingestion.scryfall_bulk",
     # PokemonTCG.io reference ingest (constants + stats only — the
     # function names overlap with Scryfall, so direct submodule import
     # is the right pattern for PokemonTCG.io's `ingest_query` etc.)
@@ -137,6 +142,9 @@ __all__ = [
     "ScryfallIngestStats",
     "iter_cards_for_query",
     "ingest_query",
+    # Scryfall bulk-data ingest (lazy — needs httpx)
+    "DEFAULT_BULK_TYPE",
+    "ingest_bulk",
     # PokemonTCG.io reference ingest (lazy — needs httpx)
     "POKEMONTCG_API_BASE_URL",
     "PokemonTCGIngestStats",
