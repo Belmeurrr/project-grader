@@ -42,6 +42,7 @@ from grader.db.models import (
     SubmissionStatus,
 )
 from grader.services import counterfeit, detection, grading, identification
+from grader.settings import get_settings
 
 _ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
 if str(_ML_ROOT) not in sys.path:
@@ -214,20 +215,32 @@ async def run_pipeline(
         # is handled inside identify_canonical_for_submission as a soft fail.
         return await _mark_failed(submission, db, f"identification_failed: {e}")
 
-    # Stage 3.5: counterfeit-authenticity check (FFT rosette + color profile,
-    # with combined verdict via _combine_verdicts in the service layer).
-    # Soft-fail: a detector blow-up should not block grading. The verdict
-    # (including UNVERIFIED on failure) is recorded so the cert page always
-    # has *some* authenticity row to display alongside the grade.
+    # Stage 3.5: counterfeit-authenticity check. Three detectors:
+    #   - rosette FFT (image-only)
+    #   - color profile (image-only)
+    #   - embedding anomaly (depends on identification result + reference
+    #     embeddings store; gracefully abstains when either is missing)
+    # The combined verdict is the conservative ensemble in
+    # `_combine_verdicts`. Soft-fail: a detector blow-up should not block
+    # grading; the verdict (including UNVERIFIED on failure) is recorded
+    # so the cert page always has *some* authenticity row to display.
     db.add(_audit(submission.id, "pipeline.counterfeit.started", {}))
     await db.flush()
     try:
         rosette_measurement = counterfeit.analyze_rosette(front_canonical_key)
         color_measurement = counterfeit.analyze_color_profile(front_canonical_key)
+        chosen = id_outcome.result.chosen
+        embedding_measurement = counterfeit.analyze_embedding_anomaly(
+            submitted_embedding=id_outcome.result.submitted_embedding,
+            manufacturer=chosen.entry.game if chosen is not None else None,
+            variant_id=chosen.entry.variant_id if chosen is not None else None,
+            references_store_path=get_settings().references_embeddings_path,
+        )
         authenticity = await counterfeit.persist_authenticity_result(
             submission_id=submission.id,
             rosette=rosette_measurement,
             color=color_measurement,
+            embedding=embedding_measurement,
             db=db,
         )
         db.add(
@@ -244,6 +257,11 @@ async def run_pipeline(
                     "color_score": float(color_measurement.color_score),
                     "color_confidence": float(color_measurement.confidence),
                     "color_p95_chroma": float(color_measurement.p95_chroma),
+                    "embedding_score": float(embedding_measurement.embedding_score),
+                    "embedding_confidence": float(embedding_measurement.confidence),
+                    "embedding_n_references": int(
+                        embedding_measurement.n_references
+                    ),
                     "combined_confidence": float(authenticity.confidence),
                 },
             )

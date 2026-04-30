@@ -250,12 +250,29 @@ async def test_pipeline_identifies_when_catalog_has_match(
 
     # The canonical (post-dewarp) is what gets identified — preview by
     # populating the catalog with the same card_in_scene image so its
-    # embedding/pHash is similar to the dewarped output.
-    catalog = _catalog_with_match(front)
+    # embedding/pHash is similar to the dewarped output. We also
+    # pre-populate the matching card_variants row so the FK on
+    # submissions.identified_variant_id is satisfied when identification
+    # picks this entry.
+    variant_uuid = uuid.uuid4()
+    await _populate_card_variant(db_session, variant_id=variant_uuid, game_str="mtg")
+    e = SimpleEmbedder()
+    catalog = InMemoryCatalogIndex()
+    catalog.add(
+        CardCatalogEntry(
+            variant_id=str(variant_uuid),
+            name="Test Card",
+            set_code="TST",
+            card_number="1",
+            game="mtg",
+            canonical_phash=compute_phash(front),
+            canonical_embedding=e.encode(front),
+        )
+    )
 
     result = await run_pipeline(
         submission_id=sub.id, db=db_session,
-        catalog=catalog, embedder=SimpleEmbedder(),
+        catalog=catalog, embedder=e,
     )
 
     refreshed = await db_session.get(Submission, sub.id)
@@ -447,17 +464,31 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert grade is not None
     assert authenticity is not None
     assert authenticity.verdict in set(AuthenticityVerdict)
-    # Both detectors in the ensemble persist their raw outputs for
+    # All three detectors in the ensemble persist their raw outputs for
     # offline recalibration. Pinning their presence at the top-level
     # so a regression that drops a detector is loud.
     assert "rosette" in authenticity.detector_scores
     assert "color" in authenticity.detector_scores
+    assert "embedding_anomaly" in authenticity.detector_scores
     assert "rosette" in authenticity.model_versions
     assert "color" in authenticity.model_versions
+    assert "embedding_anomaly" in authenticity.model_versions
     # Per-detector verdicts are stored in the detector_scores blob so a
     # later reviewer can see which detector pushed the combined verdict.
     assert "verdict" in authenticity.detector_scores["rosette"]
     assert "verdict" in authenticity.detector_scores["color"]
+    assert "verdict" in authenticity.detector_scores["embedding_anomaly"]
+    # Empty catalog → embedding-anomaly cannot identify the variant →
+    # UNVERIFIED with abstain_reason="unidentified". Documents the
+    # graceful-degradation path.
+    assert (
+        authenticity.detector_scores["embedding_anomaly"]["verdict"]
+        == AuthenticityVerdict.UNVERIFIED.value
+    )
+    assert (
+        authenticity.detector_scores["embedding_anomaly"]["abstain_reason"]
+        == "unidentified"
+    )
     assert 0.0 <= authenticity.confidence <= 1.0
 
 
@@ -498,7 +529,144 @@ async def test_pipeline_writes_counterfeit_audit_log_entries(
         assert "rosette_confidence" in payload
         assert "color_score" in payload
         assert "color_confidence" in payload
+        assert "embedding_score" in payload
+        assert "embedding_confidence" in payload
+        assert "embedding_n_references" in payload
         assert "combined_confidence" in payload
+
+
+async def _populate_card_variant(
+    db: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    game_str: str = "mtg",
+) -> None:
+    """Insert a CardSet + CardVariant pair so the FK on
+    submissions.identified_variant_id is satisfiable when identification
+    finds a match. Tests that exercise the identification →
+    embedding-anomaly path need this; tests that use an empty catalog
+    don't."""
+    from grader.db.models import CardSet, CardVariant, Game
+
+    game = Game(game_str)
+    set_obj = CardSet(
+        id=uuid.uuid4(),
+        game=game,
+        code=f"TST{uuid.uuid4().hex[:6]}",  # unique per call
+        name="Test Set",
+    )
+    db.add(set_obj)
+    await db.flush()
+
+    db.add(CardVariant(
+        id=variant_id,
+        game=game,
+        set_id=set_obj.id,
+        card_number="1",
+        name="Test Card",
+    ))
+    await db.flush()
+
+
+def _write_reference_embeddings(
+    npz_path: Path,
+    *,
+    manufacturer: str,
+    variant_id: str,
+    embedding: np.ndarray,
+) -> None:
+    """Write a single-entry reference_embeddings.npz at `npz_path` so the
+    embedding-anomaly detector can find a match for the test catalog's
+    chosen variant. Bypasses ml/data/ingestion/reference_embeddings.embed_references
+    (which needs an image on disk and an embedder) by writing the npz
+    directly with the same key shape."""
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    key = f"{manufacturer}/{variant_id}"
+    np.savez(str(npz_path), **{key: embedding.astype(np.float32)})
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_embedding_anomaly_when_references_available(
+    s3_bucket: str, db_session: AsyncSession, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When identification matches a variant AND the references store has
+    an embedding for that variant, the embedding-anomaly detector
+    actually runs (n_references >= 1, confidence > 0). This is the
+    end-to-end happy path for the third detector."""
+    from grader.settings import get_settings
+
+    user = await _make_user(db_session)
+    sub = await _make_submission(db_session, user)
+    front = card_in_scene(fill=0.55)
+    await _add_shot(db_session, sub.id, ShotKind.FRONT_FULL, s3_bucket, front)
+
+    # Build a catalog with one entry whose variant_id is a known UUID, and
+    # pre-populate the corresponding card_variants row so the FK on
+    # submissions.identified_variant_id is satisfied when identification
+    # picks this entry.
+    variant_uuid = uuid.uuid4()
+    await _populate_card_variant(db_session, variant_id=variant_uuid, game_str="mtg")
+
+    e = SimpleEmbedder()
+    catalog_embedding = e.encode(front)
+    catalog = InMemoryCatalogIndex()
+    catalog.add(
+        CardCatalogEntry(
+            variant_id=str(variant_uuid),
+            name="Test Card",
+            set_code="TST",
+            card_number="1",
+            game="mtg",
+            canonical_phash=compute_phash(front),
+            canonical_embedding=catalog_embedding,
+        )
+    )
+
+    # Write a reference embedding for the same variant. We use the
+    # catalog's own embedding so the submitted-vs-reference distance is
+    # near zero — the detector should score authentic-looking with
+    # confidence reflecting n_refs=1.
+    npz_path = tmp_path / "reference_embeddings.npz"
+    _write_reference_embeddings(
+        npz_path,
+        manufacturer="mtg",
+        variant_id=str(variant_uuid),
+        embedding=catalog_embedding,
+    )
+    # Repoint the settings cache to the test npz.
+    get_settings.cache_clear()
+    monkeypatch.setenv("REFERENCES_EMBEDDINGS_PATH", str(npz_path))
+
+    try:
+        await run_pipeline(
+            submission_id=sub.id, db=db_session,
+            catalog=catalog, embedder=e,
+        )
+    finally:
+        get_settings.cache_clear()  # don't leak the env override
+
+    authenticity = await db_session.scalar(
+        select(AuthenticityResult).where(AuthenticityResult.submission_id == sub.id)
+    )
+    assert authenticity is not None
+    emb_scores = authenticity.detector_scores["embedding_anomaly"]
+    # The headline assertion: the detector RAN. n_references > 0 and
+    # abstain_reason is None means the lookup hit and the scoring path
+    # executed — that's what we're testing here. The exact score depends
+    # on how `detect_and_dewarp_shot` transforms the input scene before
+    # re-encoding (the submitted embedding is from the dewarped canonical,
+    # not the original scene), so we don't pin it to 0.9+.
+    assert emb_scores["n_references"] == 1
+    # Confidence ramps from 0 at n_refs=0; the n_refs=1 anchor is 0.4.
+    assert emb_scores["confidence"] >= 0.4
+    # The submitted card is the same scene as the reference — verdict
+    # should be on the authentic side of the band, not LIKELY_COUNTERFEIT.
+    assert emb_scores["verdict"] in {
+        AuthenticityVerdict.AUTHENTIC.value,
+        AuthenticityVerdict.SUSPICIOUS.value,
+    }
+    assert emb_scores["abstain_reason"] is None
 
 
 @pytest.mark.asyncio

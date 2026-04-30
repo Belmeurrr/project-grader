@@ -222,3 +222,135 @@ def test_combine_verdicts_all_unverified_returns_unverified() -> None:
 def test_combine_verdicts_empty_returns_unverified() -> None:
     """Defensive: an empty verdict list (no detectors ran) is UNVERIFIED."""
     assert counterfeit._combine_verdicts([]) == AuthenticityVerdict.UNVERIFIED
+
+
+# -----------------------------
+# analyze_embedding_anomaly — abstain paths and detector path
+# -----------------------------
+
+
+def test_analyze_embedding_anomaly_abstains_when_submitted_embedding_missing(
+    tmp_path: Path,
+) -> None:
+    """No submitted embedding (e.g. identification short-circuited on a
+    pHash exact match) → no-signal measurement with reason='unidentified'.
+    Documents the design that embedding-anomaly never raises for non-
+    error reasons; abstain is encoded in confidence=0, n_references=0."""
+    m = counterfeit.analyze_embedding_anomaly(
+        submitted_embedding=None,
+        manufacturer="mtg",
+        variant_id="some-variant",
+        references_store_path=tmp_path / "doesnt_exist.npz",
+    )
+    assert m.n_references == 0
+    assert m.confidence == 0.0
+    assert m.metadata.get("reason") == "unidentified"
+
+
+def test_analyze_embedding_anomaly_abstains_when_unidentified(
+    tmp_path: Path,
+) -> None:
+    m = counterfeit.analyze_embedding_anomaly(
+        submitted_embedding=np.random.default_rng(0).standard_normal(8).astype(np.float32),
+        manufacturer=None,
+        variant_id=None,
+        references_store_path=tmp_path / "doesnt_exist.npz",
+    )
+    assert m.n_references == 0
+    assert m.confidence == 0.0
+    assert m.metadata.get("reason") == "unidentified"
+
+
+def test_analyze_embedding_anomaly_abstains_when_store_missing(
+    tmp_path: Path,
+) -> None:
+    """Identified card BUT references npz doesn't exist → no_references
+    abstain. The detector should never crash on a missing store."""
+    m = counterfeit.analyze_embedding_anomaly(
+        submitted_embedding=np.random.default_rng(0).standard_normal(8).astype(np.float32),
+        manufacturer="mtg",
+        variant_id="abc-123",
+        references_store_path=tmp_path / "doesnt_exist.npz",
+    )
+    assert m.n_references == 0
+    assert m.confidence == 0.0
+    assert m.metadata.get("reason") == "no_references"
+
+
+def test_analyze_embedding_anomaly_abstains_when_variant_not_in_store(
+    tmp_path: Path,
+) -> None:
+    """References npz exists but doesn't have an entry for the requested
+    variant → no_references abstain."""
+    npz = tmp_path / "ref.npz"
+    np.savez(str(npz), **{"mtg/other-variant": np.zeros(8, dtype=np.float32)})
+
+    m = counterfeit.analyze_embedding_anomaly(
+        submitted_embedding=np.zeros(8, dtype=np.float32),
+        manufacturer="mtg",
+        variant_id="missing-variant",
+        references_store_path=npz,
+    )
+    assert m.n_references == 0
+    assert m.metadata.get("reason") == "no_references"
+
+
+def test_analyze_embedding_anomaly_runs_detector_when_references_present(
+    tmp_path: Path,
+) -> None:
+    """Identified card + matching reference → detector runs, returns a
+    real (non-abstain) measurement. Submitted == reference embedding
+    means cosine distance 0 and a high authenticity score."""
+    npz = tmp_path / "ref.npz"
+    ref = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    np.savez(str(npz), **{"mtg/abc-123": ref})
+
+    m = counterfeit.analyze_embedding_anomaly(
+        submitted_embedding=ref.copy(),
+        manufacturer="mtg",
+        variant_id="abc-123",
+        references_store_path=npz,
+    )
+    assert m.n_references == 1
+    assert m.confidence > 0.0
+    # Same embedding → cosine distance ≈ 0 → score saturates near 1.
+    assert m.embedding_score >= 0.9
+    assert m.distance_from_centroid < 1e-3
+    assert m.metadata.get("reason") is None
+
+
+def test_verdict_from_embedding_anomaly_maps_to_enum() -> None:
+    """The string verdicts from ml/pipelines/counterfeit/ensemble round-
+    trip cleanly into the SQLAlchemy AuthenticityVerdict enum."""
+    from pipelines.counterfeit.embedding_anomaly import EmbeddingAnomalyMeasurement
+
+    AV = AuthenticityVerdict
+    # n_refs=0 → confidence=0 → UNVERIFIED.
+    abstain = EmbeddingAnomalyMeasurement(
+        embedding_score=0.5,
+        distance_from_centroid=0.0,
+        n_references=0,
+        confidence=0.0,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_embedding_anomaly(abstain) == AV.UNVERIFIED
+
+    # High score + sufficient confidence → AUTHENTIC.
+    authentic = EmbeddingAnomalyMeasurement(
+        embedding_score=0.95,
+        distance_from_centroid=0.05,
+        n_references=3,
+        confidence=0.7,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_embedding_anomaly(authentic) == AV.AUTHENTIC
+
+    # Low score + sufficient confidence → LIKELY_COUNTERFEIT.
+    fake = EmbeddingAnomalyMeasurement(
+        embedding_score=0.10,
+        distance_from_centroid=0.50,
+        n_references=3,
+        confidence=0.7,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_embedding_anomaly(fake) == AV.LIKELY_COUNTERFEIT

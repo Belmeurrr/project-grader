@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     submission_max_image_bytes: int = 25 * 1024 * 1024
     submission_required_shots: int = 6
 
+    # Path to the manufacturer reference-embeddings .npz produced by
+    # ml/data/ingestion/reference_embeddings.embed_references. The
+    # embedding-anomaly counterfeit detector looks up authentic
+    # exemplars here at inference time. If the file doesn't exist (no
+    # references ingested yet, or the path is wrong), the detector
+    # gracefully degrades to UNVERIFIED for every submission — the
+    # rest of the ensemble (rosette + color) still runs.
+    references_embeddings_path: str = Field(
+        default="~/manufacturer_refs/reference_embeddings.npz",
+        description=(
+            "Path to the reference embeddings npz used by the "
+            "embedding-anomaly counterfeit detector. Tilde-expanded."
+        ),
+    )
+
     # ----- Auth (Clerk) -----
     # The auth dependency supports two modes, switched via `dev_auth_enabled`:
     #

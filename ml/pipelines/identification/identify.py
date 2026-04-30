@@ -42,6 +42,12 @@ class IdentificationResult:
     candidates: list[IdentificationCandidate]
     chosen: IdentificationCandidate | None
     confidence: float            # confidence in `chosen`, or 0 if None
+    # The submitted-card embedding produced during identification. Carried
+    # on the result so downstream stages (notably the embedding-anomaly
+    # counterfeit detector) can reuse it instead of re-encoding the
+    # canonical. May be None when identification short-circuited on a
+    # confident pHash exact match — in that case no embedding was computed.
+    submitted_embedding: NDArray[np.float32] | None = None
 
     @property
     def identified(self) -> bool:
@@ -90,7 +96,12 @@ def identify(
 
     candidates = _merge_and_rank(phash_hits, embedding_hits)[:top_k]
     if not candidates:
-        return IdentificationResult(candidates=[], chosen=None, confidence=0.0)
+        return IdentificationResult(
+            candidates=[],
+            chosen=None,
+            confidence=0.0,
+            submitted_embedding=embedding,
+        )
 
     chosen = candidates[0]
     confidence = _calibrate_confidence(chosen, candidates)
@@ -99,11 +110,13 @@ def identify(
             candidates=candidates,
             chosen=None,
             confidence=confidence,
+            submitted_embedding=embedding,
         )
     return IdentificationResult(
         candidates=candidates,
         chosen=chosen,
         confidence=confidence,
+        submitted_embedding=embedding,
     )
 
 

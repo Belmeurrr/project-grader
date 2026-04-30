@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from pipelines.counterfeit.color import ColorProfileMeasurement
+from pipelines.counterfeit.embedding_anomaly import EmbeddingAnomalyMeasurement
 from pipelines.counterfeit.rosette import RosetteMeasurement
 
 
@@ -65,6 +66,18 @@ COLOR_MIN_CONFIDENCE: float = 0.4
 COLOR_MODEL_VERSION: str = "cielab-chroma-v1"
 
 
+# Embedding-anomaly detector. Score is a logistic of the cosine distance
+# between the submitted embedding and the centroid of the reference
+# embeddings for the same variant (lower distance → higher score). The
+# detector only has signal when at least one reference is on file —
+# anything below `_MIN_CONFIDENCE` (which corresponds to having very few
+# refs, see `_CONFIDENCE_BY_NREFS` in measure.py) is UNVERIFIED.
+EMBEDDING_AUTHENTIC_THRESHOLD: float = 0.65
+EMBEDDING_COUNTERFEIT_THRESHOLD: float = 0.35
+EMBEDDING_MIN_CONFIDENCE: float = 0.4
+EMBEDDING_MODEL_VERSION: str = "centroid-cosine-v1"
+
+
 # --------------------------------------------------------------------------
 # Per-detector verdict mappers
 # --------------------------------------------------------------------------
@@ -97,6 +110,23 @@ def verdict_from_color_profile(m: ColorProfileMeasurement) -> str:
     if m.color_score >= COLOR_AUTHENTIC_THRESHOLD:
         return VERDICT_AUTHENTIC
     if m.color_score < COLOR_COUNTERFEIT_THRESHOLD:
+        return VERDICT_LIKELY_COUNTERFEIT
+    return VERDICT_SUSPICIOUS
+
+
+def verdict_from_embedding_anomaly(m: EmbeddingAnomalyMeasurement) -> str:
+    """Tri-state verdict for the embedding-anomaly detector.
+
+    UNVERIFIED when no references were available (n_references == 0,
+    which forces confidence to 0) or when the available references are
+    too few to trust the centroid distance. The signal scales with how
+    many authentic exemplars we have for the variant; the detector
+    abstains for variants we haven't seen at all."""
+    if m.confidence < EMBEDDING_MIN_CONFIDENCE:
+        return VERDICT_UNVERIFIED
+    if m.embedding_score >= EMBEDDING_AUTHENTIC_THRESHOLD:
+        return VERDICT_AUTHENTIC
+    if m.embedding_score < EMBEDDING_COUNTERFEIT_THRESHOLD:
         return VERDICT_LIKELY_COUNTERFEIT
     return VERDICT_SUSPICIOUS
 
@@ -154,8 +184,13 @@ __all__ = [
     "COLOR_COUNTERFEIT_THRESHOLD",
     "COLOR_MIN_CONFIDENCE",
     "COLOR_MODEL_VERSION",
+    "EMBEDDING_AUTHENTIC_THRESHOLD",
+    "EMBEDDING_COUNTERFEIT_THRESHOLD",
+    "EMBEDDING_MIN_CONFIDENCE",
+    "EMBEDDING_MODEL_VERSION",
     # Logic
     "verdict_from_rosette",
     "verdict_from_color_profile",
+    "verdict_from_embedding_anomaly",
     "combine_verdicts",
 ]

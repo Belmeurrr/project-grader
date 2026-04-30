@@ -36,11 +36,16 @@ from pipelines.counterfeit.color import (  # noqa: E402
     ColorProfileMeasurement,
     measure_color_profile,
 )
+from pipelines.counterfeit.embedding_anomaly import (  # noqa: E402
+    EmbeddingAnomalyMeasurement,
+    measure_embedding_anomaly,
+)
 from pipelines.counterfeit.rosette import (  # noqa: E402
     RosetteMeasurement,
     measure_rosette,
 )
 from pipelines.counterfeit import ensemble  # noqa: E402
+from data.ingestion.reference_embeddings import lookup_references  # noqa: E402
 
 # Re-export thresholds + verdict logic from the ml-side ensemble module
 # so existing imports (tests, etc.) keep working without reaching into
@@ -54,6 +59,10 @@ COLOR_AUTHENTIC_THRESHOLD = ensemble.COLOR_AUTHENTIC_THRESHOLD
 COLOR_COUNTERFEIT_THRESHOLD = ensemble.COLOR_COUNTERFEIT_THRESHOLD
 COLOR_MIN_CONFIDENCE = ensemble.COLOR_MIN_CONFIDENCE
 COLOR_MODEL_VERSION = ensemble.COLOR_MODEL_VERSION
+EMBEDDING_AUTHENTIC_THRESHOLD = ensemble.EMBEDDING_AUTHENTIC_THRESHOLD
+EMBEDDING_COUNTERFEIT_THRESHOLD = ensemble.EMBEDDING_COUNTERFEIT_THRESHOLD
+EMBEDDING_MIN_CONFIDENCE = ensemble.EMBEDDING_MIN_CONFIDENCE
+EMBEDDING_MODEL_VERSION = ensemble.EMBEDDING_MODEL_VERSION
 
 
 class CounterfeitFailedError(Exception):
@@ -103,6 +112,85 @@ def analyze_rosette(canonical_s3_key: str) -> RosetteMeasurement:
         ) from e
 
 
+def analyze_embedding_anomaly(
+    submitted_embedding: np.ndarray | None,
+    *,
+    manufacturer: str | None,
+    variant_id: str | None,
+    references_store_path: str | Path,
+) -> EmbeddingAnomalyMeasurement:
+    """Run the embedding-anomaly counterfeit detector.
+
+    Unlike the rosette and color detectors (which operate on the
+    canonical image directly), this detector compares the *submitted
+    card's identification embedding* to a centroid of authentic
+    reference embeddings for the same variant. It therefore depends
+    on (a) identification having produced an embedding and (b) at
+    least one reference embedding being on file for the identified
+    variant.
+
+    The detector returns a no-signal `EmbeddingAnomalyMeasurement`
+    (n_references=0, confidence=0, score=0.5) — which the ensemble's
+    `verdict_from_embedding_anomaly` maps to UNVERIFIED — when:
+      - no submitted embedding is available (e.g. identification
+        short-circuited on a confident pHash exact match and never
+        computed an embedding), OR
+      - the card was not identified to a known variant, OR
+      - the identified variant has no reference embeddings stored
+        (uncommon variants, fresh sets, or a stale store).
+
+    This is by design: the detector abstains gracefully so the
+    surrounding ensemble (rosette + color) still produces a verdict.
+
+    Args:
+        submitted_embedding: float32 (d,) embedding of the submitted
+            canonical, or None if unavailable.
+        manufacturer: short-name from the catalog entry's `game`
+            field ("mtg", "pokemon", ...). None if unidentified.
+        variant_id: per-printing string id matching the references
+            store keys (Scryfall UUID for MTG, "<set>-<num>" for
+            Pokemon). None if unidentified.
+        references_store_path: path to the npz archive produced by
+            `ml/data/ingestion/reference_embeddings.embed_references`.
+
+    Returns:
+        EmbeddingAnomalyMeasurement. Always returns a measurement
+        (never raises CounterfeitFailedError) — the abstain path is
+        a measurement with confidence=0, not an exception.
+    """
+    if (
+        submitted_embedding is None
+        or manufacturer is None
+        or variant_id is None
+    ):
+        return _no_signal_embedding_measurement(reason="unidentified")
+
+    references = lookup_references(
+        Path(references_store_path), manufacturer, variant_id
+    )
+    if references is None:
+        return _no_signal_embedding_measurement(reason="no_references")
+
+    return measure_embedding_anomaly(
+        np.asarray(submitted_embedding, dtype=np.float32),
+        np.asarray(references, dtype=np.float32),
+    )
+
+
+def _no_signal_embedding_measurement(*, reason: str) -> EmbeddingAnomalyMeasurement:
+    """Construct an embedding-anomaly measurement that the ensemble will
+    map to UNVERIFIED. Used when the detector can't run for non-error
+    reasons — unidentified card, no references, etc."""
+    return EmbeddingAnomalyMeasurement(
+        embedding_score=0.5,
+        distance_from_centroid=0.0,
+        n_references=0,
+        confidence=0.0,
+        manufacturer_profile="generic",
+        metadata={"reason": reason},
+    )
+
+
 def analyze_color_profile(canonical_s3_key: str) -> ColorProfileMeasurement:
     """Run the CIELAB color-profile counterfeit detector on a canonical image.
 
@@ -148,6 +236,15 @@ def _verdict_from_color_profile(m: ColorProfileMeasurement) -> AuthenticityVerdi
     return AuthenticityVerdict(ensemble.verdict_from_color_profile(m))
 
 
+def _verdict_from_embedding_anomaly(
+    m: EmbeddingAnomalyMeasurement,
+) -> AuthenticityVerdict:
+    """Same shape as the others against the embedding-anomaly thresholds.
+    The detector self-abstains (UNVERIFIED) when no references are
+    available — see `analyze_embedding_anomaly` for the abstain paths."""
+    return AuthenticityVerdict(ensemble.verdict_from_embedding_anomaly(m))
+
+
 def _reasons_from_color_profile(
     m: ColorProfileMeasurement, verdict: AuthenticityVerdict
 ) -> list[str]:
@@ -172,6 +269,50 @@ def _reasons_from_color_profile(
         reasons.append(
             f"borderline chroma — neither clearly offset nor inkjet "
             f"(color_score={m.color_score:.2f}, p95_chroma={m.p95_chroma:.1f})"
+        )
+    return reasons
+
+
+def _reasons_from_embedding_anomaly(
+    m: EmbeddingAnomalyMeasurement, verdict: AuthenticityVerdict
+) -> list[str]:
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        # The metadata "reason" tag distinguishes unidentified-card from
+        # no-references-on-file from genuinely-too-few-references.
+        why = m.metadata.get("reason") if isinstance(m.metadata, dict) else None
+        if why == "unidentified":
+            reasons.append("card not identified — no variant to compare against")
+        elif why == "no_references":
+            reasons.append(
+                "no authentic reference embeddings on file for this variant"
+            )
+        else:
+            reasons.append(
+                f"insufficient references for centroid analysis "
+                f"(n_references={m.n_references}, confidence={m.confidence:.2f})"
+            )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"submitted embedding consistent with authentic exemplars "
+            f"(embedding_score={m.embedding_score:.2f}, "
+            f"distance={m.distance_from_centroid:.3f}, "
+            f"n_refs={m.n_references})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"submitted embedding far from authentic centroid "
+            f"(embedding_score={m.embedding_score:.2f}, "
+            f"distance={m.distance_from_centroid:.3f}, "
+            f"n_refs={m.n_references})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"borderline embedding distance — neither clearly authentic "
+            f"nor counterfeit (embedding_score={m.embedding_score:.2f}, "
+            f"distance={m.distance_from_centroid:.3f}, "
+            f"n_refs={m.n_references})"
         )
     return reasons
 
@@ -218,6 +359,7 @@ async def persist_authenticity_result(
     *,
     rosette: RosetteMeasurement,
     color: ColorProfileMeasurement,
+    embedding: EmbeddingAnomalyMeasurement,
     db: AsyncSession,
 ) -> AuthenticityResult:
     """Insert or update the AuthenticityResult row for a submission.
@@ -226,19 +368,23 @@ async def persist_authenticity_result(
     submission_id), so re-runs update in place rather than colliding on
     the unique constraint.
 
-    Per-detector verdicts are computed by `_verdict_from_rosette` and
-    `_verdict_from_color_profile`; the combined row-level verdict comes
-    from `_combine_verdicts`. The combined `confidence` field is the
-    MIN of per-detector confidences — a single high-confidence detector
-    can flag a fake even if others abstain, but the row's confidence
-    only reflects "confident overall" when both detectors are confident.
+    Per-detector verdicts come from the `_verdict_from_*` mappers; the
+    combined row-level verdict is `_combine_verdicts(...)`. The combined
+    `confidence` field is the MIN over CONFIDENT detectors only —
+    abstaining detectors (confidence < their MIN_CONFIDENCE threshold)
+    are excluded from the min so their abstain doesn't drag the row
+    confidence to zero. If every detector abstains, combined confidence
+    is 0.
 
     The detector_scores blob carries each detector's raw outputs
     verbatim so a future re-calibration can recompute verdicts from
     history without re-running the math."""
     rosette_verdict = _verdict_from_rosette(rosette)
     color_verdict = _verdict_from_color_profile(color)
-    verdict = _combine_verdicts([rosette_verdict, color_verdict])
+    embedding_verdict = _verdict_from_embedding_anomaly(embedding)
+    verdict = _combine_verdicts(
+        [rosette_verdict, color_verdict, embedding_verdict]
+    )
 
     detector_scores = {
         "rosette": {
@@ -259,14 +405,29 @@ async def persist_authenticity_result(
             "manufacturer_profile": color.manufacturer_profile,
             "verdict": color_verdict.value,
         },
+        "embedding_anomaly": {
+            "score": float(embedding.embedding_score),
+            "distance_from_centroid": float(embedding.distance_from_centroid),
+            "n_references": int(embedding.n_references),
+            "confidence": float(embedding.confidence),
+            "manufacturer_profile": embedding.manufacturer_profile,
+            "verdict": embedding_verdict.value,
+            "abstain_reason": (
+                embedding.metadata.get("reason")
+                if isinstance(embedding.metadata, dict)
+                else None
+            ),
+        },
     }
     reasons: list[str] = []
     reasons.extend(_reasons_from_rosette(rosette, rosette_verdict))
     reasons.extend(_reasons_from_color_profile(color, color_verdict))
+    reasons.extend(_reasons_from_embedding_anomaly(embedding, embedding_verdict))
 
     model_versions = {
         "rosette": ROSETTE_MODEL_VERSION,
         "color": COLOR_MODEL_VERSION,
+        "embedding_anomaly": EMBEDDING_MODEL_VERSION,
         "thresholds": {
             "rosette_authentic": ROSETTE_AUTHENTIC_THRESHOLD,
             "rosette_counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
@@ -274,13 +435,26 @@ async def persist_authenticity_result(
             "color_authentic": COLOR_AUTHENTIC_THRESHOLD,
             "color_counterfeit": COLOR_COUNTERFEIT_THRESHOLD,
             "color_min_confidence": COLOR_MIN_CONFIDENCE,
+            "embedding_authentic": EMBEDDING_AUTHENTIC_THRESHOLD,
+            "embedding_counterfeit": EMBEDDING_COUNTERFEIT_THRESHOLD,
+            "embedding_min_confidence": EMBEDDING_MIN_CONFIDENCE,
         },
     }
 
-    # Combined confidence: min across detectors. The row's "confidence"
-    # is what a downstream UI shows as "we're sure"; that should only
-    # be high when both detectors agree they have signal.
-    combined_confidence = float(min(rosette.confidence, color.confidence))
+    # Combined confidence: min across CONFIDENT detectors (those with
+    # confidence ≥ their per-detector min-confidence threshold). An
+    # abstaining detector contributes UNVERIFIED but doesn't drag the
+    # row confidence to zero — embedding-anomaly will abstain on every
+    # uncatalogued card, and we don't want that to mask the rosette/
+    # color signal that DID fire.
+    confident: list[float] = []
+    if rosette.confidence >= ROSETTE_MIN_CONFIDENCE:
+        confident.append(float(rosette.confidence))
+    if color.confidence >= COLOR_MIN_CONFIDENCE:
+        confident.append(float(color.confidence))
+    if embedding.confidence >= EMBEDDING_MIN_CONFIDENCE:
+        confident.append(float(embedding.confidence))
+    combined_confidence = min(confident) if confident else 0.0
 
     existing = await db.scalar(
         select(AuthenticityResult).where(
