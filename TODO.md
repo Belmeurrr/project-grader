@@ -8,7 +8,7 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Now — do next (1 session each)
 
-> **Status as of 2026-04-30 (late session)**: Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for both MTG (Scryfall, paginated + bulk) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) are committed. Public cert page (`/cert/[id]`) is live in apps/web with a public-cacheable API endpoint. Per-variant exemplar accumulator from PSA ingest is in place — every PSA-graded card we identify becomes a new authentic exemplar that bumps embedding-anomaly's confidence ramp over time. Bulk-data Scryfall ingest now usable for full-catalog (~85k printings) sweeps. Real training of the ML heads stays data-blocked on PSA corpus growth + variant-linkage work.
+> **Status as of 2026-04-30 (late session)**: Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for both MTG (Scryfall, paginated + bulk) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) are committed. Public cert page (`/cert/[id]`) is live, paired with the new owner-side capture wizard at `/grade/[id]` — the product now has a complete end-to-end input → output surface in apps/web. Per-variant exemplar accumulator from PSA ingest is in place — every PSA-graded card we identify becomes a new authentic exemplar that bumps embedding-anomaly's confidence ramp over time. Bulk-data Scryfall ingest now usable for full-catalog (~85k printings) sweeps. Real training of the ML heads stays data-blocked on PSA corpus growth + variant-linkage work.
 
 - [ ] **First real corners trainer run** (when corpus crosses 200 samples)
   - At current ingest rate (~30-50/day), expected ~3-5 days from 2026-04-29
@@ -31,12 +31,6 @@ Each item has enough context to pick it up cold without reloading session state.
   - The accumulator (`scripts/accumulate_psa_exemplars.py`) is shipped + tested. It needs to actually run on the machine with the PSA `scraped.jsonl`. Fits naturally into the daily cycle: launchd PSA ingest → `embed_references` → `accumulate_psa_exemplars` → next-day inference path picks up the new exemplars.
   - Smoke first: `--max-records 200` to confirm catalog matches happen at the expected rate. Most PSA records will land in `skipped_unidentified` until catalog coverage grows; that's the expected baseline.
   - Wire into the launchd plist alongside `psa_daily_ingest` once smoke is clean.
-
-- [ ] **Web capture flow** — functional-only capture pages
-  - UX decisions: camera permissions flow, error states, retake handling, multi-shot wizard order
-  - Pages to build: `/grade` (capture), `/grade/[id]` (status + in-progress)
-  - The user said "no design polish yet" — but the capture flow still has UX choices
-  - Pairs naturally with the public cert page (in "Now") since both touch apps/web
 
 ---
 
@@ -112,6 +106,7 @@ Each item has enough context to pick it up cold without reloading session state.
 ## Recently shipped
 
 ### 2026-04-30
+- **Web capture flow** — `apps/web/lib/submission.ts` (typed owner-side client) + `apps/web/app/grade/page.tsx` (kickoff) + `apps/web/app/grade/[id]/page.tsx` (status-aware wizard). Wizard order: front → back → TL → TR → BR → BL (clockwise). Per-shot flow: presign → PUT to S3 → register (server runs quality gate) → quality_passed advances or surfaces reasons for retake. Camera via `getUserMedia({ facingMode: "environment" })` with file-input fallback for permission-denied / iOS-quirk paths. Submit-for-grading button enables once front passes (REQUIRED_SHOTS = (FRONT_FULL,)); other shots are optional but improve the grade. PROCESSING status polls every 2s until COMPLETED, then redirects to `/cert/[id]`. Auth uses dev-mode `Authorization: Dev <clerk_id>` from `NEXT_PUBLIC_DEV_CLERK_ID` (real Clerk SDK swap is one function); no design polish per prior guidance. Typecheck clean on the new files.
 - **Bulk-data Scryfall ingest path** — `data/ingestion/scryfall_bulk.py` + tests + CLI wiring. New `ingest_bulk(...)` mirrors `ingest_query` but pulls the full `default_cards` dump from `/bulk-data` in one shot (sidesteps the ~1750-result `/cards/search` soft cap). Reuses `ingest_card`, `ScryfallIngestStats`, `LocalReferenceStore` — only the fetch strategy is new. Streamed chunked-write keeps the download itself constant-memory; parsing uses `json.load` (peak ~1-1.5 GB for default_cards, swap point for ijson noted in the docstring). CLI: `python -m scripts.manufacturer_refs_ingest --bulk [--bulk-cache-dir ...] [--keep-bulk-cache] [--max-cards N]`. 14 new tests; ingestion suite (scryfall + scryfall_bulk + pokemontcg + references_storage) all green.
 - **Public cert page** — `apps/api/grader/routers/cert.py` + `apps/web/app/cert/[id]/page.tsx` (460841a + 33e9c4e). Public, cacheable read of a COMPLETED submission for the `/cert/[id]` route. `Cache-Control: public, max-age=300, stale-while-revalidate=3600`. 404 (opaque) for unknown / in-progress / failed submissions. Per-detector breakdown surfaces as a typed list so adding ensemble detectors #4-7 doesn't require a schema bump.
 - **Per-variant exemplar accumulator** — `data/ingestion/psa_exemplars.py` + `scripts/accumulate_psa_exemplars.py`. Walks PSA `scraped.jsonl`, identifies each record against the catalog built from on-disk references + their embeddings, appends matched submissions' embeddings to the npz under the same `(manufacturer, variant_id)` key. Idempotent by `cert_id` via sidecar `psa_exemplars_log.jsonl`. CLI: `python -m scripts.accumulate_psa_exemplars [--psa-data-dir ...] [--refs-data-dir ...]`. 12 tests; full ml suite 342/2/0.
