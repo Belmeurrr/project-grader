@@ -8,13 +8,7 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Now — do next (1 session each)
 
-> **Status as of 2026-04-29 (late session)**: Counterfeit ensemble is now **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for both MTG (Scryfall) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) are committed; real training stays data-blocked on PSA corpus growth + variant-linkage work. The next high-leverage step is the public cert page — the first user-clickable surface that ties Grade + AuthenticityResult together.
-
-- [ ] **Public cert page** — `/cert/[id]` route in apps/web
-  - Phase 1 MVP requirement (every grading produces a shareable URL)
-  - Frontend-only, no UX input required (data display, no user-input forms)
-  - Fetches Grade + AuthenticityResult for a submission, renders all three detectors' scores + per-detector verdicts + combined verdict
-  - The first piece of the system someone can actually click through to see end-to-end output. Highest demoability per session.
+> **Status as of 2026-04-30 (late session)**: Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for both MTG (Scryfall) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) are committed. Public cert page (`/cert/[id]`) is live in apps/web with a public-cacheable API endpoint. Per-variant exemplar accumulator from PSA ingest is in place — every PSA-graded card we identify becomes a new authentic exemplar that bumps embedding-anomaly's confidence ramp over time. Real training of the ML heads stays data-blocked on PSA corpus growth + variant-linkage work.
 
 - [ ] **First real corners trainer run** (when corpus crosses 200 samples)
   - At current ingest rate (~30-50/day), expected ~3-5 days from 2026-04-29
@@ -38,10 +32,10 @@ Each item has enough context to pick it up cold without reloading session state.
   - New module `data/ingestion/scryfall_bulk.py` that streams the bulk JSON, reuses the same `LocalReferenceStore`. Public surface mirrors `ingest_query`.
   - Image download stays per-card against the existing CDN — bulk-data only saves on metadata round-trips.
 
-- [ ] **Per-variant exemplar accumulation from PSA ingest** (broaden embedding-anomaly coverage)
-  - Embedding-anomaly currently only has signal for cards whose variant is in the manufacturer reference store. PSA-graded submissions identified to the same variant ARE additional authentic exemplars — accumulate them into the same npz under the same key (the storage layer already handles `(n_refs, d)` arrays).
-  - Builder script: walk PSA `scraped.jsonl`, for each record run identification, when identification picks a variant append the PSA submission's embedding to the variant's reference array.
-  - Bumps `n_references` per variant which directly increases embedding-anomaly confidence.
+- [ ] **Run accumulator against the live PSA corpus** (operational, not engineering)
+  - The accumulator (`scripts/accumulate_psa_exemplars.py`) is shipped + tested. It needs to actually run on the machine with the PSA `scraped.jsonl`. Fits naturally into the daily cycle: launchd PSA ingest → `embed_references` → `accumulate_psa_exemplars` → next-day inference path picks up the new exemplars.
+  - Smoke first: `--max-records 200` to confirm catalog matches happen at the expected rate. Most PSA records will land in `skipped_unidentified` until catalog coverage grows; that's the expected baseline.
+  - Wire into the launchd plist alongside `psa_daily_ingest` once smoke is clean.
 
 - [ ] **Web capture flow** — functional-only capture pages
   - UX decisions: camera permissions flow, error states, retake handling, multi-shot wizard order
@@ -120,8 +114,13 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ---
 
-## Recently shipped (2026-04-29 session)
+## Recently shipped
 
+### 2026-04-30
+- **Public cert page** — `apps/api/grader/routers/cert.py` + `apps/web/app/cert/[id]/page.tsx` (460841a + 33e9c4e). Public, cacheable read of a COMPLETED submission for the `/cert/[id]` route. `Cache-Control: public, max-age=300, stale-while-revalidate=3600`. 404 (opaque) for unknown / in-progress / failed submissions. Per-detector breakdown surfaces as a typed list so adding ensemble detectors #4-7 doesn't require a schema bump.
+- **Per-variant exemplar accumulator** — `data/ingestion/psa_exemplars.py` + `scripts/accumulate_psa_exemplars.py`. Walks PSA `scraped.jsonl`, identifies each record against the catalog built from on-disk references + their embeddings, appends matched submissions' embeddings to the npz under the same `(manufacturer, variant_id)` key. Idempotent by `cert_id` via sidecar `psa_exemplars_log.jsonl`. CLI: `python -m scripts.accumulate_psa_exemplars [--psa-data-dir ...] [--refs-data-dir ...]`. 12 tests; full ml suite 342/2/0.
+
+### 2026-04-29
 - **Manufacturer reference scrapers** — `data/ingestion/scryfall.py` (faab948) + `data/ingestion/pokemontcg.py` (d24691a). CLI: `python -m scripts.manufacturer_refs_ingest --source {mtg,pokemon} --query "..."`.
 - **Reference embedding pass** — `data/ingestion/reference_embeddings.py` (6caa8a1). `embed_references` walks the references JSONL, embeds with the identification embedder, writes a single npz keyed by `"<manufacturer>/<variant_id>"`. CLI: `python -m scripts.embed_references --data-dir ...`. Lookup helpers: `load_embeddings`, `lookup_references`.
 - **Surface trainer skeleton** — `training/trainers/surface.py` (31b7adb). EfficientNet-V2-S encoder + SegFormer-style decoder, 7-class CrossEntropyLoss. Default `mask_loader` returns all-background until real per-pixel labels exist.
