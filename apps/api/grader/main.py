@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from grader import __version__
 from grader.logging import configure_logging, get_logger
-from grader.routers import health, submissions
+from grader.routers import cert, health, submissions
 from grader.settings import get_settings
 
 
@@ -36,6 +36,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(submissions.router)
+    app.include_router(cert.router)
     return app
 
 

@@ -102,3 +102,52 @@ class SubmissionOut(BaseModel):
     identified_card: IdentifiedCard | None = None
     grades: list[GradeOut] = Field(default_factory=list)
     authenticity: AuthenticityOut | None = None
+
+
+class DetectorScorePublic(BaseModel):
+    """Per-detector entry in the public cert page's authenticity block.
+
+    Mirrors the shape persisted under
+    `AuthenticityResult.detector_scores[<detector>]` after commit
+    94b83ca: scalar score + per-detector verdict + per-detector
+    confidence, with a typed-but-open `metadata` slot for detector-
+    specific extras (peak_strength for rosette, p95_chroma for color,
+    etc.) so the cert page can render forensic detail without each
+    new detector requiring a schema bump."""
+
+    detector: str
+    score: float
+    verdict: AuthenticityVerdict
+    confidence: float
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class CertAuthenticityPublic(BaseModel):
+    """Public-cert view of the AuthenticityResult row.
+
+    Distinct from `AuthenticityOut` (which carries the legacy flat
+    `dict[str, float]` for detector_scores). This shape exposes the
+    per-detector breakdown the cert page renders."""
+
+    verdict: AuthenticityVerdict
+    confidence: float
+    reasons: list[str]
+    model_versions: dict[str, object] = Field(default_factory=dict)
+    detectors: list[DetectorScorePublic] = Field(default_factory=list)
+
+
+class CertificatePublic(BaseModel):
+    """Public-cert view of a COMPLETED submission.
+
+    Returned by `GET /cert/{submission_id}` without authentication.
+    Deliberately a strict SUBSET of the owner-side `SubmissionOut` —
+    no user_id, no S3 keys, no shot-level metadata, no audit log.
+    The `cert_id` field is the submission UUID; the owner sees it as
+    `id`, the public sees it as `cert_id` to match the user-facing
+    label."""
+
+    cert_id: uuid.UUID
+    completed_at: datetime
+    identified_card: IdentifiedCard | None = None
+    grades: list[GradeOut] = Field(default_factory=list)
+    authenticity: CertAuthenticityPublic | None = None
