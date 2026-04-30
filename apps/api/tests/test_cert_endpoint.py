@@ -66,6 +66,13 @@ async def _make_completed_submission(
     db.add(grade)
 
     if with_authenticity:
+        # Production now writes a 3-detector ensemble: rosette + color +
+        # embedding-anomaly. The realistic scenario has embedding-anomaly
+        # ABSTAINING (confidence=0, n_references=0) for variants we don't
+        # yet have reference exemplars for — it gracefully degrades and
+        # the ensemble combines from the two confident detectors. The
+        # cert page must render the abstaining detector cleanly without
+        # blowing up the layout.
         auth = AuthenticityResult(
             submission_id=submission.id,
             verdict=AuthenticityVerdict.AUTHENTIC,
@@ -73,6 +80,7 @@ async def _make_completed_submission(
             reasons=[
                 "halftone rosette pattern detected (rosette_score=0.94, peak_strength=8.10)",
                 "high chroma consistent with offset print (color_score=1.00, p95_chroma=72.4)",
+                "embedding-anomaly abstained (no_references)",
             ],
             detector_scores={
                 "rosette": {
@@ -91,10 +99,20 @@ async def _make_completed_submission(
                     "border_white_bgr": [228, 228, 230],
                     "gain_applied": [1.12, 1.12, 1.11],
                 },
+                "embedding_anomaly": {
+                    "score": 0.5,
+                    "verdict": "unverified",
+                    "confidence": 0.0,
+                    "distance_from_centroid": 0.0,
+                    "n_references": 0,
+                    "manufacturer_profile": "generic",
+                    "abstain_reason": "no_references",
+                },
             },
             model_versions={
                 "rosette": "fft-v1",
                 "color": "cielab-chroma-v1",
+                "embedding_anomaly": "centroid-cosine-v1",
             },
         )
         db.add(auth)
@@ -174,9 +192,11 @@ async def test_cert_endpoint_returns_sanitized_payload(
 async def test_cert_endpoint_authenticity_per_detector_breakdown(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
-    """The per-detector list must surface both rosette and color, with
-    each detector's score + verdict + forensic metadata. This is what
-    powers the cert page's authenticity panel."""
+    """The per-detector list must surface all three production detectors
+    (rosette, color, embedding_anomaly) with each detector's score +
+    verdict + forensic metadata. The embedding detector is in its
+    realistic abstaining state (no reference exemplars yet for most
+    variants); the cert page must still render it cleanly."""
     sub = await _make_completed_submission(db_session)
     r = await client.get(f"/cert/{sub.id}")
     assert r.status_code == 200
@@ -185,15 +205,28 @@ async def test_cert_endpoint_authenticity_per_detector_breakdown(
     assert auth["verdict"] == "authentic"
 
     detectors = {d["detector"]: d for d in auth["detectors"]}
-    assert set(detectors) == {"rosette", "color"}
+    assert set(detectors) == {"rosette", "color", "embedding_anomaly"}
+
     assert detectors["rosette"]["score"] == 0.94
     assert detectors["rosette"]["verdict"] == "authentic"
     assert detectors["rosette"]["metadata"]["peak_strength"] == 8.10
+
     assert detectors["color"]["score"] == 1.0
     assert detectors["color"]["metadata"]["p95_chroma"] == 72.4
 
+    # Abstaining detector — confidence 0, verdict unverified, abstain
+    # reason surfaced under metadata so the cert page can show "no
+    # reference data available" rather than a misleading 50% score.
+    assert detectors["embedding_anomaly"]["verdict"] == "unverified"
+    assert detectors["embedding_anomaly"]["confidence"] == 0.0
+    assert (
+        detectors["embedding_anomaly"]["metadata"]["abstain_reason"]
+        == "no_references"
+    )
+
     assert auth["model_versions"]["rosette"] == "fft-v1"
     assert auth["model_versions"]["color"] == "cielab-chroma-v1"
+    assert auth["model_versions"]["embedding_anomaly"] == "centroid-cosine-v1"
 
 
 @pytest.mark.asyncio
