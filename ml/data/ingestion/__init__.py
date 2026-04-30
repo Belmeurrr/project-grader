@@ -24,13 +24,21 @@ via PEP 562 __getattr__):
       PSAPopScraper, ScrapeStats, parse_cert_html
   - Scryfall reference ingest:
       SCRYFALL_API_BASE_URL, ScryfallIngestStats,
-      iter_cards_for_query, ingest_card (Scryfall variant),
-      ingest_query
+      iter_cards_for_query, ingest_query
+      (these names are the Scryfall variant — for the PokemonTCG.io
+      variant import the submodule directly:
+       `from data.ingestion import pokemontcg`)
+  - PokemonTCG.io reference ingest (top-level surface):
+      POKEMONTCG_API_BASE_URL, PokemonTCGIngestStats
 
 This split lets a stdlib-only consumer (e.g. the github_seed manifest
 writer running in an environment without httpx) import the package
 without paying for httpx, while production consumers see the full
-public surface unchanged."""
+public surface unchanged. Function-name overlaps between Scryfall and
+PokemonTCG.io (both have an `ingest_query`) are resolved by exposing
+only the Scryfall functions at the top level — the PokemonTCG.io
+variant is reachable via direct submodule import, which is what the
+CLI driver does."""
 
 from __future__ import annotations
 
@@ -76,6 +84,11 @@ _LAZY_NAMES: dict[str, str] = {
     "ScryfallIngestStats": "data.ingestion.scryfall",
     "iter_cards_for_query": "data.ingestion.scryfall",
     "ingest_query": "data.ingestion.scryfall",
+    # PokemonTCG.io reference ingest (constants + stats only — the
+    # function names overlap with Scryfall, so direct submodule import
+    # is the right pattern for PokemonTCG.io's `ingest_query` etc.)
+    "POKEMONTCG_API_BASE_URL": "data.ingestion.pokemontcg",
+    "PokemonTCGIngestStats": "data.ingestion.pokemontcg",
 }
 
 
@@ -124,4 +137,7 @@ __all__ = [
     "ScryfallIngestStats",
     "iter_cards_for_query",
     "ingest_query",
+    # PokemonTCG.io reference ingest (lazy — needs httpx)
+    "POKEMONTCG_API_BASE_URL",
+    "PokemonTCGIngestStats",
 ]

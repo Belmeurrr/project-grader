@@ -2,19 +2,26 @@
 
 One-shot driver — manufacturer catalogs aren't continuously updated like
 PSA's grading queue, so this isn't a daemon. Re-run when you want a new
-set or to refresh after a Scryfall release. Safe to re-run on the same
+set or to refresh after a catalog release. Safe to re-run on the same
 data directory: idempotency is by (manufacturer, variant_id) tuple,
 already-fetched cards are skipped without an API call.
 
+Sources:
+    --source mtg     → Scryfall (api.scryfall.com), default
+    --source pokemon → PokemonTCG.io (api.pokemontcg.io)
+
+Each source exposes a different query syntax (Scryfall uses its own
+fluent search syntax; PokemonTCG.io uses Lucene). The --query string
+is passed through verbatim.
+
 Usage:
     python -m scripts.manufacturer_refs_ingest --query "set:lea"
-    python -m scripts.manufacturer_refs_ingest --query "set:m21" --max-cards 10
-    python -m scripts.manufacturer_refs_ingest --query "set:lea" --data-dir /tmp/refs
+    python -m scripts.manufacturer_refs_ingest --source pokemon --query "set.id:base1"
+    python -m scripts.manufacturer_refs_ingest --source pokemon --query "set.id:swsh1" --max-cards 10
 
 Configuration:
-    --query STR           Scryfall search syntax (required for now;
-                          when we add more sources, --source will pick
-                          between them)
+    --source STR          One of {mtg, pokemon}. Default: mtg.
+    --query STR           Source-specific search syntax.
     --data-dir PATH       Where to write references.jsonl + images.
                           Default: $MANUFACTURER_REFS_DATA_DIR or
                           ~/manufacturer_refs
@@ -49,11 +56,10 @@ _ML_ROOT = Path(__file__).resolve().parents[1]
 if str(_ML_ROOT) not in sys.path:
     sys.path.insert(0, str(_ML_ROOT))
 
-from data.ingestion import (  # noqa: E402
-    LocalReferenceStore,
-    ScryfallIngestStats,
-    ingest_query,
-)
+from data.ingestion import LocalReferenceStore  # noqa: E402
+
+
+_SOURCES = ("mtg", "pokemon")
 
 
 _logger = logging.getLogger("manufacturer_refs_ingest")
@@ -77,9 +83,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description="Ingest manufacturer reference card images.",
     )
     p.add_argument(
+        "--source",
+        choices=_SOURCES,
+        default="mtg",
+        help=(
+            "Catalog source: 'mtg' for Scryfall (default), 'pokemon' for "
+            "PokemonTCG.io. Each source has its own query syntax."
+        ),
+    )
+    p.add_argument(
         "--query",
         required=True,
-        help="Scryfall search syntax (e.g. 'set:lea', 'set:m21 r:rare').",
+        help=(
+            "Source-specific search syntax. Scryfall: e.g. 'set:lea', "
+            "'set:m21 r:rare'. PokemonTCG.io (Lucene): e.g. 'set.id:base1', "
+            "'rarity:Rare'."
+        ),
     )
     p.add_argument(
         "--data-dir",
@@ -102,6 +121,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _dispatch_ingest(source: str):
+    """Resolve the (ingest_query_callable, stats_factory) pair for a
+    source. Submodule imports are deferred to here so the CLI --help
+    output doesn't pay for httpx."""
+    if source == "mtg":
+        from data.ingestion import scryfall
+
+        return scryfall.ingest_query, scryfall.ScryfallIngestStats
+    if source == "pokemon":
+        from data.ingestion import pokemontcg
+
+        return pokemontcg.ingest_query, pokemontcg.PokemonTCGIngestStats
+    raise ValueError(f"unknown source: {source!r}")  # unreachable: argparse gates this
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -115,22 +149,22 @@ def main(argv: list[str] | None = None) -> int:
     log_path = data_dir / "ingest_log.jsonl"
 
     _logger.info(
-        "starting ingest data_dir=%s query=%r max_cards=%s",
+        "starting ingest source=%s data_dir=%s query=%r max_cards=%s",
+        args.source,
         data_dir,
         args.query,
         args.max_cards,
     )
 
     store = LocalReferenceStore(data_dir)
+    ingest_fn, _stats_cls = _dispatch_ingest(args.source)
 
-    # Lazy import here so the CLI's --help doesn't pay for httpx.
     kwargs: dict = {}
     if args.user_agent:
         kwargs["user_agent"] = args.user_agent
 
-    stats: ScryfallIngestStats
     try:
-        stats = ingest_query(
+        stats = ingest_fn(
             args.query,
             store=store,
             max_cards=args.max_cards,
@@ -141,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
             log_path,
             {
                 "timestamp": _now_iso(),
+                "source": args.source,
                 "query": args.query,
                 "outcome": "error",
                 "error": str(e),
@@ -154,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         log_path,
         {
             "timestamp": _now_iso(),
+            "source": args.source,
             "query": args.query,
             "outcome": "ok",
             "stats": asdict(stats),
@@ -161,7 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     _logger.info(
-        "ingest done query=%r stats=%s",
+        "ingest done source=%s query=%r stats=%s",
+        args.source,
         args.query,
         asdict(stats),
     )
