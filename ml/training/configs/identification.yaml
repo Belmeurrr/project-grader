@@ -1,0 +1,94 @@
+# DinoV2 ViT-B/14 identification embedding skeleton.
+#
+# Run from ml/:
+#   uv run python -m training.trainers.identification train.smoke_only=true train.epochs=1
+#
+# Reads scraped JSONL from PSA_INGEST_DATA_DIR (default ~/psa_data).
+# Identification trains a DinoV2 backbone with triplet-margin loss
+# against (anchor, positive, negative) image triples. The skeleton's
+# positive-sampling strategy is "same image, different augmentation"
+# (see ml/training/datasets/psa_identification.py for why) — string-
+# matched same-variant positives are the planned swap-in once the
+# catalog has stable variant ids.
+
+dataset:
+  # JSONL produced by ml/data/ingestion/psa_public_api. Same path the
+  # corners + surface trainers use; identification reads the same
+  # records, only the dataset-side image-prep + triplet-sampling
+  # differ.
+  jsonl: ${oc.env:PSA_INGEST_DATA_DIR,${oc.env:HOME}/psa_data}/scraped.jsonl
+  # Bail rather than train on too few examples. Triplet learning is
+  # particularly sensitive to corpus size — too few samples means the
+  # negative sampler keeps drawing the same handful of negatives and
+  # the embedding space collapses. 200 is a soft floor for the
+  # skeleton; real training wants thousands.
+  min_samples: 200
+  val_fraction: 0.20
+  # Grade range — records outside the band are dropped. Identification
+  # does not depend on grade, but the gate keeps the data shape
+  # commensurable with the other heads (and a grade outside the band
+  # is suspicious — likely a malformed record).
+  grade_min: 1.0
+  grade_max: 10.0
+  # Reproducible split.
+  split_seed: 49374
+  # Triplet sampler RNG. Independent seed so changing the data split
+  # doesn't reshuffle which negatives are paired with which anchors
+  # epoch-to-epoch.
+  triplet_seed: 53901
+
+model:
+  # DinoV2 ViT-B/14 via timm. The pretrained DinoV2 weights yield
+  # excellent off-the-shelf image features even before fine-tuning, so
+  # the swap from `pretrained=false` (skeleton) to `pretrained=true`
+  # (real training) is the single biggest-impact knob in this config.
+  #
+  # If `vit_base_patch14_dinov2.lvd142m` is not in your local timm,
+  # the trainer falls back to `vit_base_patch14_reg4_dinov2.lvd142m`
+  # (DinoV2 with register tokens — same weights, slightly different
+  # forward path). See _build_model in
+  # ml/training/trainers/identification.py for the fallback chain.
+  backbone: vit_base_patch14_dinov2.lvd142m
+  pretrained: false
+  # No projection head: the skeleton uses the backbone's pooled
+  # embedding (D=768 for ViT-B) directly. A 2-layer MLP projection
+  # head is a reasonable swap-in once we tune for retrieval recall.
+  embedding_dim: 768
+  # 224 is a safe default. DinoV2 ViT-B/14 was trained at 224 / 518;
+  # 224 is divisible by 14 (16 patches per side) and runs cheaply on
+  # CPU for the smoke loop. Real training uses 518.
+  image_size: 224
+
+train:
+  epochs: 30
+  batch_size: 16
+  num_workers: 4
+  optimizer: AdamW
+  # Lower LR than corners/surface because we're fine-tuning a large
+  # pretrained ViT, not training from scratch. 1e-4 is a defensible
+  # starting point for DinoV2 fine-tunes; ablate once we have data.
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  lr_min: 1.0e-7
+  # Triplet-margin loss margin (anchor-positive vs. anchor-negative
+  # distance gap). 0.2 is the canonical default in the FaceNet paper
+  # for L2-normalized 128-D embeddings; we scale up to 1.0 because
+  # DinoV2 embeddings are not pre-normalized and have a larger
+  # natural distance scale.
+  triplet_margin: 1.0
+  # p=2 = Euclidean distance. p=1 (L1) is a defensible alt for ViT
+  # embeddings; tune later.
+  triplet_p: 2.0
+  output_dir: ${oc.env:GRADER_TRAIN_OUT,outputs/identification}
+  # Device: CUDA index, "cpu", or "mps" for Apple Silicon.
+  device: ${oc.env:GRADER_TRAIN_DEVICE,cpu}
+  # If True, run a single mini-batch end-to-end without writing
+  # checkpoints — useful for proving the data pipeline plumbs through
+  # before committing to a long run.
+  smoke_only: false
+
+mlflow:
+  experiment: card-identification-embedding
+  run_name: ${now:%Y%m%d-%H%M%S}_dinov2_triplet
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,http://localhost:5000}
+  fail_on_tracking_error: false
