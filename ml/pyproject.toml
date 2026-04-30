@@ -10,6 +10,11 @@ dependencies = [
   "scipy>=1.14.0",
   "pydantic>=2.9.0",
   "httpx>=0.27.0",
+  # PyYAML is needed by the detection-manifest builder (writes the
+  # ultralytics dataset.yaml) and by tests that read training configs.
+  # Hydra ships its own copy under the `training` extra, but the
+  # manifest builder + tests run without that extra installed.
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
