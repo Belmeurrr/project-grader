@@ -1,0 +1,30 @@
+# Card detection dataset manifest (ultralytics YOLO format).
+#
+# This is the *canonical location* the detection trainer
+# (`ml/training/trainers/detection.py`) reads via the
+# `dataset.manifest` config key. Until real PSA-labeled data lands,
+# point `path` at a synthesized dataset built by:
+#
+#     uv run python -m scripts.build_detection_manifest \
+#         --out-dir <out_dir> --n-train 80 --n-val 20 --seed 0
+#
+# Then either:
+#   * overwrite this file by re-running with `--also-write-canonical`
+#     (the script copies the generated `dataset.yaml` here), or
+#   * set GRADER_DETECTION_DATASET=<out_dir>/dataset.yaml in the env
+#     and the trainer will pick that up over this default.
+#
+# Schema notes:
+#   path  — absolute root of the dataset directory.
+#   train — path to image dir (relative to `path`, per ultralytics).
+#   val   — path to image dir (relative to `path`, per ultralytics).
+#   nc    — number of classes (must match dataset.num_classes in
+#           training/configs/detection.yaml — currently 1).
+#   names — class id → name. Single class "card" for v1.
+
+path: PLACEHOLDER_REGENERATE_VIA_BUILD_SCRIPT
+train: images/train
+val: images/val
+nc: 1
+names:
+  0: card
