@@ -8,23 +8,19 @@ This doc tracks near-term work and current state. The architectural plan (4-phas
 
 ## Where we are
 
-- **17 of 26 near-term roadmap items shipped** across 12 work sessions. The data flywheel is live (PSA Public API ingest running daily under launchd); the counterfeit ensemble has 2/7 detectors wired into the pipeline (FFT + color), 1 more built but not wired (embedding anomaly), and 4 still blocked on data prerequisites. The corners ML trainer skeleton is in place pending corpus growth.
-- ~16,500 LOC across Python + TypeScript + YAML.
-- **27 test files**; benchmark harness at `python -m evaluation.counterfeit_benchmark` runs in ~3s.
-- **8 feature commits** on `main`:
-  - `45fd695` — foundation through edges grading
-  - `6f54de7` — parallel work: FFT counterfeit + Clerk JWT + PSA scraper
-  - `c174171` — FFT wired into pipeline (Grade + AuthenticityResult rows)
-  - `0c4a414` — PSA Public API client + GitHub seed-corpus ingestor
-  - `ab43c6a` — calendar-time daily PSA ingest under launchd
-  - `8ea54b4` — corners ML trainer skeleton
-  - `ed29e35` + `94b83ca` — color-profile counterfeit detector built + wired
-  - `65bbcdb` — embedding-anomaly counterfeit detector (pure fn; service wrapper deferred)
-  - `00b056a` — refactor: dedupe canonical loader + lazy-load httpx imports
-  - `6823e48` — counterfeit-detector benchmark + shared ensemble module
+- **26 items shipped** across 13 work sessions (see Done table below). Counterfeit ensemble is now **3/7 wired** end-to-end (rosette + color + embedding-anomaly). Manufacturer reference flywheel is live for MTG (Scryfall) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) are committed; real training stays data-blocked on PSA corpus growth + variant linkage. Public cert page (`/cert/[id]`) is the first user-clickable surface. Per-variant PSA exemplar accumulator now bumps embedding-anomaly's `n_references` per cycle.
+- ~28,000 LOC across Python + TypeScript + YAML.
+- **35+ test files**; benchmark harness at `python -m evaluation.counterfeit_benchmark` runs in ~3s.
+- **Feature commits on `main`** (foundation → today):
+  - Foundation: `45fd695`, `6f54de7`, `c174171`, `0c4a414`, `ab43c6a` — quality gating, detection+dewarp, identification, FFT counterfeit + wiring, PSA Public API + GitHub seed, daily launchd ingest.
+  - Counterfeit ensemble: `ed29e35` + `94b83ca` (color built+wired), `65bbcdb` (embedding-anomaly pure fn), `c5af923` (embedding-anomaly wired), `6823e48` (benchmark + shared ensemble module).
+  - ML trainer skeletons: `8ea54b4` (corners), `31b7adb` (surface), `41e68f2`+`cd7a7f0` (identification/DinoV2), `09fe2a4`+`e477270` (detection manifest builder).
+  - Manufacturer reference flywheel: `faab948` (Scryfall), `d24691a` (PokemonTCG.io), `6caa8a1`+`6d9032a` (reference embedding pass).
+  - Cert page + cleanup: `00b056a` (canonical-loader dedup + lazy httpx), `460841a`+`33e9c4e` (public cert page + 3-detector test fixture), `7d4cdfe` (late-session TODO sweep).
 - **Calendar-time tracks running:**
-  - PSA daily ingest (launchd `com.projectgrader.psa-ingest`, 09:00 local) — corpus at ~35 certs after first manual fire; expect ~30–50 successful triples/day on free tier.
-  - Corpus needs ~165 more samples to cross the corners-trainer's `min_samples=200` threshold (~3-5 days at current rate).
+  - PSA daily ingest (launchd `com.projectgrader.psa-ingest`, 09:00 local) — ~30–50 successful triples/day on free tier.
+  - Corpus needs to cross corners-trainer's `min_samples=200` threshold (~3-5 days at current rate from 2026-04-29).
+  - Manufacturer reference re-embed cycle: run `scripts.embed_references` after each new Scryfall / PokemonTCG ingest so newly-ingested variants become eligible for embedding-anomaly. Idempotent by `(manufacturer, variant_id)`.
 
 ## Pipeline state
 
@@ -55,26 +51,26 @@ This doc tracks near-term work and current state. The architectural plan (4-phas
                                     [Surface grading]               ⊘ blocked on PSA data + flash shot
                                               │
                                               ▼
-                                    [Counterfeit ensemble]          ✓ rosette + color wired (Stage 3.5)
+                                    [Counterfeit ensemble]          ✓ rosette + color + embedding wired (Stage 3.5)
                                        └─ FFT rosette               ✓ built + wired
                                        └─ Color profile             ✓ built + wired (CIELAB chroma)
-                                       └─ Embedding anomaly         ◐ pure fn built; wiring blocked on per-variant ref data
+                                       └─ Embedding anomaly         ✓ built + wired (centroid cosine; abstains gracefully on no-refs)
                                        └─ Typography                ⊘ TODO (needs OCR dep)
-                                       └─ Substrate (paper)         ⊘ TODO (needs reference library)
-                                       └─ Holographic parallax      ⊘ needs tilt shot
-                                       └─ Siamese reference         ⊘ needs reference set
+                                       └─ Substrate (paper)         ⊘ TODO (needs labeled flash-shot dataset)
+                                       └─ Holographic parallax      ⊘ needs tilt shot in capture flow
+                                       └─ Siamese reference         ⊘ folds into DinoV2 trainer (different head, same fine-tune)
                                               │
                                               ▼
                                     [Submission COMPLETED]
                                        Grade row:           centering ✓ edges ✓ corners ⊘ surface ⊘ final ⊘
-                                       AuthenticityResult:  rosette ✓  color ✓  others ⊘
+                                       AuthenticityResult:  rosette ✓  color ✓  embedding ✓  others ⊘
 ```
 
 `final` stays NULL until corners + surface land. By design — we never fabricate a number.
 
 ---
 
-## Done (17 items)
+## Done (26 items)
 
 | # | Item | Commit | Notes |
 |---|---|---|---|
@@ -95,6 +91,15 @@ This doc tracks near-term work and current state. The architectural plan (4-phas
 | 15 | **Color-profile counterfeit detector — built + wired** | ed29e35 + 94b83ca | Ensemble #4. CIELAB p95 chroma after white-border-sampled chromatic-adaptation calibration. Logistic squash midpoint at 40 (between inkjet ceiling and offset baseline). Stage 3.5 now runs both detectors with conservative ensemble combiner: any LIKELY_COUNTERFEIT wins, AUTHENTIC requires consensus among confident detectors, UNVERIFIED detectors don't block. AuthenticityResult row carries both detectors' raw outputs + per-detector verdicts + combined verdict. 18 inline + 11 service tests passing. |
 | 16 | **Embedding-anomaly counterfeit detector — pure fn** | 65bbcdb | Ensemble #7. Cosine-distance-from-centroid against per-variant authentic reference embeddings; logistic squash with confidence ramp by `n_refs` (0 → 0.0, 1 → 0.4, 5 → 0.85, 10+ → 1.0). 22 tests on synthetic embeddings. **Service wrapper deferred** — the per-variant authentic-exemplars store doesn't exist yet (catalog has 1 ref per variant, not several). Wiring blocked on either manufacturer-reference-scraper output or a dedicated authentic-exemplars table seeded from PSA ingest aggregated by SpecID. |
 | 17 | **Counterfeit-detector benchmark + shared ensemble module** | 6823e48 | Operational hygiene. `ml/pipelines/counterfeit/ensemble.py` is the canonical home for thresholds + verdict combiner; apps/api re-exports them. `ml/evaluation/counterfeit_benchmark/` runs the labeled-corpus benchmark (`python -m evaluation.counterfeit_benchmark`); 50-sample synthetic corpus (25 authentic + 25 counterfeit). Current scores: rosette 98% accuracy, color 100% accuracy, ensemble 98% accuracy. JSON + Markdown + console reports. Hard CI gate intentionally NOT added until corpus is ≥50% real images. |
+| 18 | **Manufacturer reference image scrape — Scryfall (MTG)** | faab948 | `data/ingestion/scryfall.py` — paginated `/cards/search` client + image download, polite rate limiting, ToS-compliant attribution. Reference store at `~/manufacturer_refs/<manufacturer>/<variant_id>/` with a JSONL index. CLI: `python -m scripts.manufacturer_refs_ingest --source mtg --query "..."`. ~25k MTG printings reachable; per-set ingest is the typical workflow until bulk-data path lands. |
+| 19 | **Manufacturer reference image scrape — PokemonTCG.io** | d24691a | `data/ingestion/pokemontcg.py` — same shape as Scryfall but for Pokemon cards (~16k printings). Variant key is `"<set>-<num>"`. Same JSONL/image storage, same `manufacturer_refs_ingest` CLI with `--source pokemon`. Both scrapers feed a unified reference store consumed by the embedding pass. |
+| 20 | **Reference embedding pass** | 6caa8a1 + 6d9032a | `data/ingestion/reference_embeddings.py` — walks the manufacturer reference JSONL, embeds each canonical with the identification embedder, writes a single `reference_embeddings.npz` keyed by `"<manufacturer>/<variant_id>"`. Idempotent on key — re-running adds new variants without rewriting existing arrays. Helpers: `load_embeddings`, `lookup_references` (latter consumed by `analyze_embedding_anomaly`). CLI: `python -m scripts.embed_references --data-dir ...`. |
+| 21 | **Embedding-anomaly wired into pipeline_runner** | c5af923 | `analyze_embedding_anomaly` service wrapper at `apps/api/grader/services/counterfeit.py`. Stage 3.5 now runs all three detectors; ensemble combiner consumes the new `EMBEDDING_*_THRESHOLD` constants and `verdict_from_embedding_anomaly`. Graceful UNVERIFIED on no-references / unidentified / no-embedding paths so the ensemble degrades cleanly. `persist_authenticity_result` carries embedding's score, distance, n_references, and abstain_reason in `detector_scores["embedding_anomaly"]`. |
+| 22 | **Surface ML trainer skeleton** | 31b7adb | EfficientNet-V2-S encoder + SegFormer-style decoder, 7-class CrossEntropyLoss (background, scratch, print_line, indentation, stain, paper_loss, foil_scratch). PSASurfaceDataset with a pluggable `mask_loader` (default returns all-background for the skeleton). Hydra+MLflow shape matching corners.py + detection.py. Real training data-blocked on flash-shot data + per-pixel labels. |
+| 23 | **DinoV2 identification trainer skeleton** | 41e68f2 + cd7a7f0 | `training/trainers/identification.py` — ViT-B/14 backbone with triplet loss. Augmentation-based positives (anchor + positive = same image, two transforms) until variant_id linkage between PSA records and the catalog exists. ViT-B/14 patch constraint encoded: `image_size` must be multiple of 14. Replaces the public `facebook/dinov2-base` baseline once trained. |
+| 24 | **YOLO detection-dataset manifest builder** | 09fe2a4 + e477270 | `data/catalogs/build_detection_manifest.py` — synthesizes labeled scenes from `card_in_scene` fixtures with analytically-derived bboxes. Emits a manifest at `ml/data/catalogs/detection_dataset.yaml` consumable by the YOLOv11-seg trainer (45fd695). CLI: `python -m scripts.build_detection_manifest --out-dir ... --n-train ... --n-val ...`. |
+| 25 | **Public cert page (`/cert/[id]`)** | 460841a + 33e9c4e | First user-clickable surface tying Grade + AuthenticityResult together. Public no-auth `GET /cert/{submission_id}` endpoint at `apps/api/grader/routers/cert.py` with sanitized payload (no user_id / S3 keys / audit log), opaque 404 for in-progress submissions, `Cache-Control: public, max-age=300, swr=3600`. Server component at `apps/web/app/cert/[id]/page.tsx` with ISR (revalidate=300), color-coded verdict badge (lime/amber/red/zinc), per-detector breakdown (3 detectors) with abstain-reason rendering. 7 endpoint tests pinning the public contract; test fixture models the realistic 3-detector ensemble including embedding-anomaly's abstaining UNVERIFIED state. |
+| 26 | **Per-variant PSA exemplar accumulator** | 96749f6 | `data/ingestion/psa_exemplars.py` + `scripts/accumulate_psa_exemplars.py`. Walks PSA `scraped.jsonl`, identifies each record against the catalog built from on-disk references + their embeddings, appends matched submissions' embeddings to `reference_embeddings.npz` under the same `(manufacturer, variant_id)` key. Idempotent by `cert_id` via sidecar `psa_exemplars_log.jsonl` so repeated runs don't double-add. Bumps `n_references` per variant which directly raises embedding-anomaly's confidence ramp over time. CLI: `python -m scripts.accumulate_psa_exemplars [--psa-data-dir ...] [--refs-data-dir ...]`. 12 tests; full ml suite 342 passing. |
 
 ---
 
@@ -104,17 +109,17 @@ In dependency / value order. Items marked **calendar-time** can run in the backg
 
 | # | Task | Type | Blocked on | Notes |
 |---|---|---|---|---|
-| 1 | **Public cert page** | Frontend | — | `/cert/[id]` route in apps/web. Displays Grade + AuthenticityResult for a submission. Phase 1 MVP. Doesn't need user UX input (data display only); the most demoable next step. |
-| 2 | **First real corners trainer end-to-end run** | Run | corpus ≥ 200 (~3-5 days) | Skeleton committed; once corpus crosses `dataset.min_samples=200`, run `python -m training.trainers.corners train.smoke_only=true` to prove the torch step end-to-end. Loss is meaningless on tiny corpora; goal is "wiring works", not "model converges". |
-| 3 | **Wire embedding-anomaly into pipeline_runner** | API | per-variant authentic exemplars | The pure function is committed. Wiring needs either (a) the manufacturer reference scraper output, or (b) a new `authentic_exemplars` table aggregating PSA ingest output by `SpecID`. Once exemplars exist for ≥1 variant the wiring is a c174171-shape commit. |
-| 4 | **Manufacturer reference image scraper** | Calendar-time | non-corporate network access | Sources: Scryfall bulk (MTG), PokemonTCG.io (Pokemon), Topps press releases. Both Scryfall + PokemonTCG.io are reset by user's corporate network (TLS connection drops to certain Cloudflare zones); deferred until off-network or a different source works. Reference data feeds the siamese, substrate, holographic, embedding-anomaly detectors. |
-| 5 | **Web capture flow** | Frontend | User UX input | Functional-only landing page. Capture flows have UX choices (camera permissions, error states, retake). Should pair, not autonomous agent. |
+| 1 | **First real corners trainer end-to-end run** | Run | corpus ≥ 200 (~3-5 days) | Skeleton committed; once corpus crosses `dataset.min_samples=200`, run `python -m training.trainers.corners train.smoke_only=true` to prove the torch step end-to-end. Loss is meaningless on tiny corpora; goal is "wiring works", not "model converges". |
+| 2 | **Run accumulator against the live PSA corpus** | Run / ops | — | `scripts/accumulate_psa_exemplars.py` is built + tested. Needs to actually run on the launchd box once after each ingest cycle. Most PSA records will land in `skipped_unidentified` until catalog coverage grows; that's the expected baseline. Wire into the launchd plist alongside `psa_daily_ingest` once the smoke run is clean. |
+| 3 | **Recalibrate counterfeit thresholds against real cards** | ML | small labeled set | All thresholds in `ml/pipelines/counterfeit/ensemble.py` are calibrated against synthetic generators; embedding-anomaly's are placeholders mirroring rosette + color shape. Recalibration needs a small labeled set (real authentics from PSA ingest identified to known variants + known counterfeits). Benchmark harness is the regression gate. |
+| 4 | **Bulk-data Scryfall ingest path** | ML | — | Per-set `/cards/search` works (~1750-result cap); bulk JSON endpoint is the corpus-scale path. New module `data/ingestion/scryfall_bulk.py` mirroring `ingest_query`. Image download stays per-card; bulk-data only saves on metadata round-trips. |
+| 5 | **Web capture flow** | Frontend | User UX input | Functional-only `/grade` + `/grade/[id]` pages. Camera permissions, error states, retake handling, multi-shot wizard order — pair-friendly UX choices. Pairs naturally with the now-shipped cert page since both touch apps/web. |
 | 6 | **Terraform dev env** | DevOps | User AWS choices | Account ID, region, naming, IAM strategy — needs your input. |
-| 7 | **Surface ML model trainer skeleton** | ML | — | Mirrors corners skeleton's pattern: PSACornerDataset → PSASurfaceDataset, regression head → SegFormer-B3 multi-modal. Skeleton is autonomous; full training is data-blocked. |
+| 7 | **Reference-embeddings deployment path** | DevOps | containerization decisions | Where does `reference_embeddings.npz` live in prod? Local-disk default works for dev. Options: bake into Docker image, S3 + boot-time download, S3 + LRU cache, FAISS sidecar. Pick when API is being containerized for real. |
 | 8 | **Typography counterfeit detector** | ML | OCR availability | Detector #5. OCR + glyph-shape comparison. Needs PaddleOCR or similar — a real new dep. |
-| 9 | **Substrate paper detector** | ML | Reference library | Detector #6. Trained classifier on flash-shot paper region per manufacturer. |
+| 9 | **Substrate paper detector** | ML | labeled flash-shot dataset | Detector #6. Manufacturer reference library now exists, but training still needs labeled flash-shot data (which we don't have). Distinct from embedding-anomaly: substrate looks at the *paper itself* under flash, not at art content. |
 | 10 | **Holographic parallax detector** | ML | Tilt shot capture flow | Detector #3. Two-angle optical flow on holo region. Needs the tilt shot in the capture flow. |
-| 11 | **Siamese reference detector** | ML | Reference library | Detector #1. ConvNeXt-B siamese network with triplet loss. Most accurate on cards-with-references. |
+| 11 | **Siamese reference detector** | ML | folds into DinoV2 trainer | Detector #1. Same fine-tune as the DinoV2 identification trainer with a different head; consider folding into that trainer rather than building a separate one. |
 | 12 | **Mobile app (RN/Expo)** | Frontend | Web capture flow | Phase 1 MVP scope explicitly excludes mobile. v0.2. |
 | 13 | **Stripe payments** | Integration | Auth + capture flow | Free tier 5/mo, $10/mo unlimited per the plan. |
 | 14 | **TCGplayer pricing comps** | Integration | Card identification | Pricing API integration on identified-variant. |
@@ -127,17 +132,17 @@ In dependency / value order. Items marked **calendar-time** can run in the backg
 
 Three good next sessions, by priority:
 
-### Option A — Public cert page (1 session, autonomous)
-`/cert/[id]` route in apps/web — displays Grade + AuthenticityResult for a submission. Phase 1 MVP item, frontend-only, doesn't need UX input (no user-input forms; data display only). The first piece of the system someone can actually click through to see the output. After this lands, all the backend work has a visible artifact.
+### Option A — Wait for corpus, then real corners trainer run
+The corners trainer is committed; the launchd PSA ingest is dripping data daily. In ~3-5 days from 2026-04-29, the corpus crosses 200 samples, at which point `python -m training.trainers.corners train.smoke_only=true` runs end-to-end as a "proof the data pipeline plumbs through to a torch step" milestone. Real training (loss converging, useful val metrics) requires far more data; this run just proves the wiring.
 
-### Option B — Wait for corpus, then real corners trainer run
-The corners trainer is committed; the launchd PSA ingest is dripping data daily. In ~3-5 days the corpus crosses 200 samples, at which point we run `python -m training.trainers.corners train.smoke_only=true` end-to-end as a "proof the data pipeline plumbs through to a torch step" milestone. Real training (loss converging, useful val metrics) requires far more data; this run just proves the wiring.
+### Option B — sit-with-me UX session: web capture flow
+Camera permissions, error states, retake handling, multi-shot wizard order. Needs your input on UX decisions; can't be done autonomously. Pairs naturally with the now-shipped cert page (both touch apps/web). Unblocks Stripe + the full end-to-end demo flow.
 
-### Option C — sit-with-me UX session
-**Web capture flow.** Camera permissions, error states, retake handling, multi-shot wizard order. Needs your input on UX decisions; can't be done autonomously. Unblocks Stripe + the full demo flow. Pairs naturally with Option A.
+### Option C — operationalize the data flywheel
+Wire `accumulate_psa_exemplars` into the launchd plist alongside `psa_daily_ingest`, and add a `manufacturer reference re-embed` step. Daily cycle: PSA ingest → reference re-embed → exemplar accumulator → next-day inference picks up new exemplars. Each cycle bumps embedding-anomaly's `n_references` per variant, which directly raises its confidence ramp. Pure ops work; no new ML.
 
-### Option D — manufacturer reference scraper (off-corporate-network)
-Scryfall + PokemonTCG.io are TLS-reset by user's corporate network (verified 2026-04-29). When off-network (home, mobile hotspot), the scraper builds in ~1 session. Unblocks the embedding-anomaly wiring + the substrate / siamese detectors that follow.
+### Option D — recalibrate counterfeit thresholds against real cards
+All three detectors' thresholds in `ml/pipelines/counterfeit/ensemble.py` are calibrated against synthetic generators. As the corpus grows past a few hundred real authentic cards, build a small labeled benchmark slice (real authentics + known counterfeits) and recalibrate. Lock the new thresholds and version them in `model_versions`. The benchmark harness (`python -m evaluation.counterfeit_benchmark`) is already the regression gate.
 
 ---
 
@@ -145,16 +150,17 @@ Scryfall + PokemonTCG.io are TLS-reset by user's corporate network (verified 202
 
 ### Things requiring your input
 - AWS account / region / naming for Terraform
-- Web capture UX decisions (permissions flow, error states)
-- ~~PSA Public API token~~ — done 2026-04-29; token in user's shell as `PSA_PUBLIC_API_TOKEN`. Move to a `.env` once daily-budget runs start.
-- Decision on paid PSA API tier (free is 100 calls/day; paid scales but pricing not public — email `webcert@collectors.com` once daily ceiling becomes a bottleneck)
-- Counterfeit confidence calibration thresholds (currently set against synthetic fixtures; will retune with real data)
+- Web capture UX decisions (permissions flow, error states, retake handling, multi-shot wizard order)
+- Decision on paid PSA API tier — free is 100 calls/day; paid scales but pricing not public. Email `webcert@collectors.com` once daily ceiling becomes a bottleneck.
+- Counterfeit confidence calibration anchors — once real authentic + counterfeit samples exist
+- `reference_embeddings.npz` deployment path (bake-into-image vs S3 vs FAISS sidecar) — picks itself once API is being containerized for real
 
 ### Things NOT requiring your input (safe for autonomous agents)
-- Additional counterfeit detectors that mirror FFT pattern (color, typography, embedding anomaly)
-- Corners and surface ML training scripts (skeleton-only until data lands)
-- Card catalog ingestion for Pokemon (PokemonTCG.io API) and MTG (Scryfall bulk)
+- Bulk-data Scryfall ingest path (`data/ingestion/scryfall_bulk.py`) for full MTG catalog
+- Typography counterfeit detector (gated on OCR dep decision)
 - Geometric grading refinements (e.g., centering with non-uniform borders)
+- Real training of any ML head — purely data-blocked at this point; nothing for an agent to do until corpus accumulates
+- Operational-hygiene tasks: public accuracy benchmark publishing, capture-guidance acceptance test, latency SLO dashboards
 
 ### Architectural decisions paying off so far
 - **Protocol-based interfaces** (`CardDetector`, `ImageEmbedder`, `CatalogIndex`) — production swap is one env var
