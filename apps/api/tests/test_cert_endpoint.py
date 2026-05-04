@@ -308,6 +308,55 @@ async def test_cert_endpoint_surfaces_identified_card(
 
 
 @pytest.mark.asyncio
+async def test_cert_endpoint_renders_partial_grade(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """Regression: a Phase-1 Grade row with `final=None` and `corners=None`
+    (corners/surface trainers are skeletons — `compute_psa_final` returns
+    None whenever any input is missing) MUST NOT cause `GradeOut.model_validate`
+    to raise. Before the schema relaxation, this combo 500'd every cert
+    page for every real submission until the trainers shipped."""
+    user = User(
+        clerk_id=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@x",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    sub = Submission(
+        user_id=user.id,
+        status=SubmissionStatus.COMPLETED,
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(sub)
+    await db_session.flush()
+    grade = Grade(
+        submission_id=sub.id,
+        scheme=GradingScheme.PSA,
+        centering=9.0,
+        corners=None,
+        edges=None,
+        surface=None,
+        final=None,
+        confidence=0.42,
+    )
+    db_session.add(grade)
+    await db_session.flush()
+
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    grades = body["grades"]
+    assert len(grades) == 1
+    g = grades[0]
+    assert g["centering"] == 9.0
+    assert g["corners"] is None
+    assert g["edges"] is None
+    assert g["surface"] is None
+    assert g["final"] is None
+    assert g["confidence"] == 0.42
+
+
+@pytest.mark.asyncio
 async def test_cert_endpoint_sets_cache_control(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:

@@ -91,6 +91,12 @@ function GradesSection({ cert }: { cert: Certificate }) {
       <h2 className="mb-3 text-base font-medium text-zinc-200">
         Grade ({primary.scheme.toUpperCase()})
       </h2>
+      {primary.final === null && (
+        <div className="mb-3 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs font-medium text-amber-300">
+          Preliminary subgrades — final grade unavailable until corners +
+          surface analysis ships.
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
         <GradeStat label="Centering" value={primary.centering} />
         <GradeStat label="Corners" value={primary.corners} />

@@ -21,11 +21,15 @@ export type AuthenticityVerdict =
 
 export type Grade = {
   scheme: GradingScheme;
-  centering: number;
-  corners: number;
-  edges: number;
+  // All subgrades + final are nullable while the corners/edges/surface
+  // trainers are skeletons — `compute_psa_final` returns None whenever
+  // an input is missing. The cert UI renders missing values as "—" and
+  // shows a banner above the grades grid when `final === null`.
+  centering: number | null;
+  corners: number | null;
+  edges: number | null;
   surface: number | null;
-  final: number;
+  final: number | null;
   confidence: number;
   front_centering_lr: number | null;
   front_centering_tb: number | null;

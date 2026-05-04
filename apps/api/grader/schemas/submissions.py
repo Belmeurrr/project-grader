@@ -62,11 +62,16 @@ class GradeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     scheme: GradingScheme
-    centering: float
-    corners: float
-    edges: float
+    # All subgrades + final are nullable: corners/edges/surface trainers
+    # are still skeletons in Phase 1, and `compute_psa_final` returns
+    # None when any input is missing. The DB columns mirror this. The
+    # cert UI renders missing values as "—" and shows a banner explaining
+    # the partial state.
+    centering: float | None
+    corners: float | None
+    edges: float | None
     surface: float | None
-    final: float
+    final: float | None
     confidence: float
     front_centering_lr: float | None = None
     front_centering_tb: float | None = None
