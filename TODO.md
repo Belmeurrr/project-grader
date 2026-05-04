@@ -20,17 +20,17 @@ Each item has enough context to pick it up cold without reloading session state.
 - [ ] **Recalibrate counterfeit thresholds** — three detectors now, all on synthetic-fixture defaults
   - All thresholds in `ml/pipelines/counterfeit/ensemble.py` are calibrated against synthetic generators (the `synth_*` fixtures).
   - Embedding-anomaly added 2026-04-29 with placeholder thresholds (0.65 / 0.35 / 0.4) mirroring the rosette + color shape — needs real-data anchors before they're trustworthy.
-  - Once recalibrated, lock the thresholds and version them in `model_versions` metadata. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) is the regression gate.
-  - Needs: a small labeled set with both real authentics (from PSA ingest, identified to known variants so embedding-anomaly fires) + known counterfeits.
+  - **Tool now ships** (`evaluation.counterfeit_recalibration`, 97e3f71): given a labeled corpus, recommends per-detector AUTHENTIC + COUNTERFEIT thresholds via Youden's-J + an FPR-budget cap, emits a drop-in patch block for `ensemble.py`. Runs in `authentic_only` mode against `~/psa_data/scraped.jsonl` alone (the steady state once the daily accumulator has been running) — picks the AUTHENTIC threshold, leaves COUNTERFEIT alone until fakes appear. Switches to `two_sided` once a `--csv` of counterfeits is supplied.
+  - Remaining work is operational: source the counterfeit slice (manual curation or a small purchase set), run the tool, paste the patch, re-run the benchmark, lock + version in `model_versions` metadata. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) stays the regression gate.
 
 ---
 
 ## Soon — parallel-agent friendly (file-disjoint, no user input needed)
 
-- [ ] **Run accumulator against the live PSA corpus** (operational, not engineering)
-  - The accumulator (`scripts/accumulate_psa_exemplars.py`) is shipped + tested. It needs to actually run on the machine with the PSA `scraped.jsonl`. Fits naturally into the daily cycle: launchd PSA ingest → `embed_references` → `accumulate_psa_exemplars` → next-day inference path picks up the new exemplars.
-  - Smoke first: `--max-records 200` to confirm catalog matches happen at the expected rate. Most PSA records will land in `skipped_unidentified` until catalog coverage grows; that's the expected baseline.
-  - Wire into the launchd plist alongside `psa_daily_ingest` once smoke is clean.
+- [x] **Run accumulator against the live PSA corpus — wired into launchd** (2026-05-04, faea7d6)
+  - Daily cycle now runs as a 3-step chain via `ml/scripts/daily_cycle.sh`: (1) `psa_daily_ingest` drains the PSA Public API daily budget, (2) `embed_references` embeds any newly-added manufacturer references, (3) `accumulate_psa_exemplars` walks today's matched records and appends them as authentic exemplars to `reference_embeddings.npz`. Steps run independently (non-zero rc on one doesn't block the others); per-step `rc=N` lines land in `~/psa_data/launchd.stdout.log` so a failed step is triageable. The launchd plist (`com.projectgrader.psa-ingest.plist`) just hands off to the wrapper; redeploy on the macOS prod box (`launchctl unload && cp && launchctl load`).
+  - First-cycle smoke: most records land in `skipped_unidentified` until catalog coverage grows — that's the expected baseline. Watch `wc -l ~/manufacturer_refs/psa_exemplars_log.jsonl` to confirm appends are happening; per-variant exemplar count drives embedding-anomaly's confidence ramp over time.
+  - Windows operation documented in `ml/scripts/README.md` (Task Scheduler via a `daily_cycle.cmd` wrapper) for the dev box.
 
 ---
 
@@ -104,6 +104,12 @@ Each item has enough context to pick it up cold without reloading session state.
 ---
 
 ## Recently shipped
+
+### 2026-05-04
+- **Counterfeit-detector threshold recalibration tool** — `ml/evaluation/counterfeit_recalibration/` (97e3f71). Sibling to `counterfeit_benchmark`: ingests a labeled real-image corpus (`--csv` and/or `--psa-authentics scraped.jsonl`), runs it through the same ensemble runner production sees, and recommends per-detector thresholds. Two modes auto-picked from corpus contents — `two_sided` (authentics + counterfeits) uses Youden's-J on midpoint candidates + an FPR-budget cap (default ≤ 0.5%) on the LIKELY_COUNTERFEIT side; `authentic_only` (PSA-only steady state) recalibrates just the AUTHENTIC threshold and notes that COUNTERFEIT side needs fakes. Outputs a drop-in patch block for `ensemble.py` (TWO_SIDED detectors only — partial recommendations are surfaced in the report but kept out of the patch to avoid half-applying). `--json` / `--markdown` for CI / PR comments. 21 tests covering all three modes, both loaders, and end-to-end against the synthetic benchmark corpus.
+- **Daily data-flywheel wrapper** — `ml/scripts/daily_cycle.sh` (faea7d6). Replaces the previous launchd inline command with a 3-step bash chain: `psa_daily_ingest` → `embed_references` → `accumulate_psa_exemplars`. Each step runs independently (the wrapper aggregates exit codes — first non-zero rc is returned, but later steps still run on earlier failure since they have value on their own). Per-step `rc=N` lines hit `launchd.stdout.log` so a failed step is triageable. Configurable knobs: `PROJECT_ROOT`, `PYTHON`, `PSA_INGEST_DATA_DIR`, `MANUFACTURER_REFS_DATA_DIR`. Sources `$PROJECT_ROOT/.env` so secrets propagate. Smoke: `PROJECT_ROOT="$PWD" ml/scripts/daily_cycle.sh`. Plist hands off to it; previous installations keep the same `Label` so a `launchctl unload && load` cycle picks up the new behavior with no rename.
+- **Windows operation docs** — `ml/scripts/README.md` (b4d7a06). The wrapper is portable bash and runs unchanged under Git Bash; only the scheduler differs. Adds Task Scheduler setup via a `daily_cycle.cmd` wrapper (schtasks `/TR` is too brittle for inlining), an ops table (run/pause/resume/delete), and the two real Windows caveats (logged-in only, sleep-misses-runs). Brief WSL2+cron alternative.
+- **`/cert/{id}` surfaces `identified_card`** — `apps/api/grader/routers/cert.py` + `routers/submissions.py` (832275f). The public cert payload now includes the matched `(manufacturer, variant_id, name, set_code, collector_number)` from the identification pass alongside the verdict + grade. `GET /submissions/{id}` (owner-side, authed) added to support the wizard's status polling. Keeps the public payload sanitized (no user_id / S3 keys).
 
 ### 2026-04-30
 - **Web capture flow** — `apps/web/lib/submission.ts` (typed owner-side client) + `apps/web/app/grade/page.tsx` (kickoff) + `apps/web/app/grade/[id]/page.tsx` (status-aware wizard). Wizard order: front → back → TL → TR → BR → BL (clockwise). Per-shot flow: presign → PUT to S3 → register (server runs quality gate) → quality_passed advances or surfaces reasons for retake. Camera via `getUserMedia({ facingMode: "environment" })` with file-input fallback for permission-denied / iOS-quirk paths. Submit-for-grading button enables once front passes (REQUIRED_SHOTS = (FRONT_FULL,)); other shots are optional but improve the grade. PROCESSING status polls every 2s until COMPLETED, then redirects to `/cert/[id]`. Auth uses dev-mode `Authorization: Dev <clerk_id>` from `NEXT_PUBLIC_DEV_CLERK_ID` (real Clerk SDK swap is one function); no design polish per prior guidance. Typecheck clean on the new files.
