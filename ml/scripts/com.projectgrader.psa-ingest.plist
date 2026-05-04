@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd job for the daily PSA Public API ingest.
+  launchd job for the daily data-flywheel cycle.
+
+  Sequence (per ml/scripts/daily_cycle.sh):
+    1. psa_daily_ingest         — drain the PSA Public API daily budget.
+    2. embed_references         — embed any new manufacturer references.
+    3. accumulate_psa_exemplars — append today's matched PSA records as
+                                  per-variant authentic exemplars to
+                                  reference_embeddings.npz, bumping
+                                  embedding-anomaly's confidence ramp.
+
+  Label is unchanged from the original ingest-only job
+  (`com.projectgrader.psa-ingest`) so existing installations keep working
+  after a `launchctl unload && load` cycle — no need to rename files in
+  ~/Library/LaunchAgents/.
 
   Install:
     cp ml/scripts/com.projectgrader.psa-ingest.plist ~/Library/LaunchAgents/
@@ -14,7 +27,7 @@
     launchctl unload ~/Library/LaunchAgents/com.projectgrader.psa-ingest.plist
     rm ~/Library/LaunchAgents/com.projectgrader.psa-ingest.plist
 
-  Edit the four hardcoded paths below if you fork or relocate the project.
+  Edit the hardcoded PROJECT_ROOT below if you fork or relocate the project.
   See ml/scripts/README.md for full setup including the .env file.
 -->
 <plist version="1.0">
@@ -22,12 +35,14 @@
     <key>Label</key>
     <string>com.projectgrader.psa-ingest</string>
 
+    <!-- The wrapper handles cd into the project root (default
+         /Users/danielbelmeur/Github/project-grader; override via
+         PROJECT_ROOT env) and sources .env itself, so the plist just
+         hands off. Edit the absolute path here AND the default in
+         daily_cycle.sh if you fork or relocate the project. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/env</string>
-        <string>bash</string>
-        <string>-c</string>
-        <string>cd /Users/danielbelmeur/Github/project-grader &amp;&amp; set -a &amp;&amp; [ -f .env ] &amp;&amp; source .env &amp;&amp; set +a; /usr/bin/python3 ml/scripts/psa_daily_ingest.py</string>
+        <string>/Users/danielbelmeur/Github/project-grader/ml/scripts/daily_cycle.sh</string>
     </array>
 
     <!-- 09:00 local time daily. UTC midnight resets the PSA daily budget,
