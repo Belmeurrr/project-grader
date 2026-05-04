@@ -244,11 +244,16 @@ async def submit_submission(
         async_result = process_submission.delay(str(sub.id))
         task_id = async_result.id
     except Exception:
-        # Broker unreachable — leave status as PROCESSING; the worker will
-        # pick it up via the periodic reconciliation task once the broker
-        # comes back. (That reconciler is a future task; for now, surface
-        # the current state honestly.)
-        task_id = None
+        # Broker unreachable — revert the row to CAPTURING so the user can
+        # retry once the broker recovers (the early-return guard above
+        # would otherwise strand this submission in PROCESSING forever),
+        # and surface a 503 so the client knows to retry.
+        sub.status = SubmissionStatus.CAPTURING
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"reason": "broker_unavailable", "retry_after": 30},
+        )
 
     return SubmitResponse(submission_id=sub.id, status=sub.status, task_id=task_id)
 

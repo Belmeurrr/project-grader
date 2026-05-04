@@ -215,6 +215,62 @@ async def test_submit_advances_submission_to_processing(
 
 
 @pytest.mark.asyncio
+async def test_submit_503_when_broker_unavailable_and_retry_succeeds(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    s3_bucket: str,
+    db_session,
+) -> None:
+    """When Celery's broker is unreachable at enqueue time, the endpoint
+    must:
+      (a) return 503 with a structured detail body so the client retries,
+      (b) revert the submission row from PROCESSING -> CAPTURING so the
+          early-return guard doesn't strand it forever,
+      (c) allow a subsequent retry to succeed normally once the broker
+          recovers.
+    """
+    from grader.db.models import Submission
+
+    sid = await _create_submission(client, auth_headers)
+    await _upload_and_register_shot(client, auth_headers, sid, s3_bucket)
+
+    # First attempt: broker is down. delay() raises.
+    with patch(
+        "grader.workers.grading_pipeline.process_submission.delay",
+        side_effect=ConnectionError("broker unreachable"),
+    ):
+        r = await client.post(f"/submissions/{sid}/submit", headers=auth_headers)
+
+    assert r.status_code == 503
+    body = r.json()["detail"]
+    assert body["reason"] == "broker_unavailable"
+    assert body["retry_after"] == 30
+
+    # Row must have reverted to CAPTURING (not stranded in PROCESSING).
+    await db_session.expire_all()
+    sub = await db_session.get(Submission, uuid.UUID(sid))
+    assert sub.status == SubmissionStatus.CAPTURING
+
+    # Second attempt: broker is back (default autouse stub returns fake result).
+    fake_id = "task-recovered-001"
+
+    class _FakeResult:
+        id = fake_id
+
+    with patch(
+        "grader.workers.grading_pipeline.process_submission.delay",
+        return_value=_FakeResult(),
+    ) as m:
+        r2 = await client.post(f"/submissions/{sid}/submit", headers=auth_headers)
+
+    assert r2.status_code == 202
+    body2 = r2.json()
+    assert body2["status"] == "processing"
+    assert body2["task_id"] == fake_id
+    m.assert_called_once_with(sid)
+
+
+@pytest.mark.asyncio
 async def test_submit_returns_existing_state_for_completed_submission(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],
