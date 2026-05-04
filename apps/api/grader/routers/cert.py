@@ -41,12 +41,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from grader.db import get_db
-from grader.db.models import Submission, SubmissionStatus
+from grader.db.models import CardVariant, Submission, SubmissionStatus
 from grader.schemas.submissions import (
     CertAuthenticityPublic,
     CertificatePublic,
     DetectorScorePublic,
     GradeOut,
+    IdentifiedCard,
 )
 
 router = APIRouter(prefix="/cert", tags=["cert"])
@@ -76,6 +77,11 @@ async def get_certificate(
         options=[
             selectinload(Submission.grades),
             selectinload(Submission.authenticity),
+            # Chain through CardVariant → CardSet so we can render the
+            # set code on the cert without a second query.
+            selectinload(Submission.identified_variant).selectinload(
+                CardVariant.set
+            ),
         ],
     )
     if submission is None or submission.status != SubmissionStatus.COMPLETED:
@@ -95,9 +101,31 @@ async def get_certificate(
     return CertificatePublic(
         cert_id=submission.id,
         completed_at=submission.completed_at,  # required when status=COMPLETED
-        identified_card=None,  # TODO: populate once IdentifiedCard write-path lands
+        identified_card=_identified_card_or_none(submission),
         grades=grades,
         authenticity=auth,
+    )
+
+
+def _identified_card_or_none(submission: Submission) -> IdentifiedCard | None:
+    """Build the public IdentifiedCard payload from a submission's
+    eager-loaded `identified_variant`, or return None if the variant
+    didn't load / wasn't identified.
+
+    Confidence comes from the submission row (the identification
+    service writes it alongside `identified_variant_id`). If the row
+    has a variant but a NULL confidence — which shouldn't happen in
+    practice but isn't enforced at the schema level — we coerce to 0.0
+    rather than 404 the cert."""
+    variant = submission.identified_variant
+    if variant is None:
+        return None
+    return IdentifiedCard(
+        variant_id=variant.id,
+        name=variant.name,
+        set_code=variant.set.code,
+        card_number=variant.card_number,
+        confidence=float(submission.identification_confidence or 0.0),
     )
 
 

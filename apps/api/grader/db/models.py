@@ -164,6 +164,13 @@ class Submission(Base, TimestampMixin):
     authenticity: Mapped[AuthenticityResult | None] = relationship(
         back_populates="submission", cascade="all, delete-orphan", uselist=False
     )
+    # Many-to-one to the catalog variant the identification stage matched.
+    # No back_populates — we never navigate from CardVariant → submissions
+    # (that's an inverted index we don't need). Lazy="select" by default,
+    # so callers that want the variant in an async context MUST eager-load
+    # via `selectinload(Submission.identified_variant)` to avoid a sync
+    # lazy-load over the asyncpg driver.
+    identified_variant: Mapped[CardVariant | None] = relationship()
 
 
 class SubmissionShot(Base, TimestampMixin):

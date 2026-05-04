@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from grader.db import get_db
-from grader.db.models import Submission, SubmissionShot, SubmissionStatus, User
+from grader.db.models import (
+    CardVariant,
+    Submission,
+    SubmissionShot,
+    SubmissionStatus,
+    User,
+)
 from grader.schemas.submissions import (
     AuthenticityOut,
     GradeOut,
@@ -68,6 +74,9 @@ async def get_submission(
         options=[
             selectinload(Submission.grades),
             selectinload(Submission.authenticity),
+            selectinload(Submission.identified_variant).selectinload(
+                CardVariant.set
+            ),
         ],
     )
     if submission is None or submission.user_id != user.id:
@@ -247,14 +256,34 @@ async def submit_submission(
 def _to_out(submission: Submission) -> SubmissionOut:
     grades = [GradeOut.model_validate(g) for g in submission.grades]
     auth = AuthenticityOut.model_validate(submission.authenticity) if submission.authenticity else None
-    identified: IdentifiedCard | None = None
     return SubmissionOut(
         id=submission.id,
         status=submission.status,
         created_at=submission.created_at,
         completed_at=submission.completed_at,
         rejection_reason=submission.rejection_reason,
-        identified_card=identified,
+        identified_card=_identified_card_or_none(submission),
         grades=grades,
         authenticity=auth,
+    )
+
+
+def _identified_card_or_none(submission: Submission) -> IdentifiedCard | None:
+    """Build the IdentifiedCard payload from `identified_variant` if it
+    eager-loaded; otherwise None.
+
+    Mirrors the helper in `routers/cert.py` — kept inline here rather
+    than shared because the two routers serve different audiences
+    (owner vs. public) and we want each one's response shape to be
+    its own concern. Five lines is below the share-vs-duplicate
+    threshold."""
+    variant = submission.identified_variant
+    if variant is None:
+        return None
+    return IdentifiedCard(
+        variant_id=variant.id,
+        name=variant.name,
+        set_code=variant.set.code,
+        card_number=variant.card_number,
+        confidence=float(submission.identification_confidence or 0.0),
     )

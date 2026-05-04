@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from grader.db.models import (
     AuthenticityResult,
     AuthenticityVerdict,
+    CardSet,
+    CardVariant,
+    Game,
     Grade,
     GradingScheme,
     Submission,
@@ -34,10 +37,16 @@ async def _make_completed_submission(
     db: AsyncSession,
     *,
     with_authenticity: bool = True,
+    with_identification: bool = False,
 ) -> Submission:
     """Insert a User + Submission + Grade + (optionally) AuthenticityResult
     in the COMPLETED state, with the per-detector dict shape produced
-    by the rosette+color ensemble."""
+    by the rosette+color ensemble.
+
+    When `with_identification` is True, also insert a CardSet + CardVariant
+    and link the submission to the variant via `identified_variant_id` +
+    `identification_confidence`. The cert endpoint should then surface
+    the variant's name, set code, and card number on the public payload."""
     user = User(
         clerk_id=f"u_{uuid.uuid4().hex[:8]}",
         email=f"{uuid.uuid4().hex[:8]}@x",
@@ -45,10 +54,33 @@ async def _make_completed_submission(
     db.add(user)
     await db.flush()
 
+    identified_variant_id: uuid.UUID | None = None
+    identification_confidence: float | None = None
+    if with_identification:
+        card_set = CardSet(
+            game=Game.POKEMON,
+            code="CRZ",
+            name="Crown Zenith",
+        )
+        db.add(card_set)
+        await db.flush()
+        variant = CardVariant(
+            game=Game.POKEMON,
+            set_id=card_set.id,
+            card_number="160",
+            name="Pikachu V",
+        )
+        db.add(variant)
+        await db.flush()
+        identified_variant_id = variant.id
+        identification_confidence = 0.93
+
     submission = Submission(
         user_id=user.id,
         status=SubmissionStatus.COMPLETED,
         completed_at=datetime.now(timezone.utc),
+        identified_variant_id=identified_variant_id,
+        identification_confidence=identification_confidence,
     )
     db.add(submission)
     await db.flush()
@@ -239,6 +271,40 @@ async def test_cert_endpoint_handles_no_authenticity(
     r = await client.get(f"/cert/{sub.id}")
     assert r.status_code == 200
     assert r.json()["authenticity"] is None
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_omits_identified_card_when_not_identified(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """A COMPLETED submission whose identification soft-failed has no
+    identified_variant_id on the row. The cert payload should surface
+    `identified_card: null` rather than 404 — graded but anonymous is
+    a real production state for cards we don't yet have in catalog."""
+    sub = await _make_completed_submission(db_session)
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200
+    assert r.json()["identified_card"] is None
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_surfaces_identified_card(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """When the identification stage matched a catalog variant, the cert
+    payload exposes the variant's name, set code, card number, and the
+    identification confidence — sourced from the eager-loaded
+    `Submission.identified_variant` + `CardVariant.set` chain."""
+    sub = await _make_completed_submission(db_session, with_identification=True)
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200
+    card = r.json()["identified_card"]
+    assert card is not None
+    assert card["name"] == "Pikachu V"
+    assert card["set_code"] == "CRZ"
+    assert card["card_number"] == "160"
+    assert card["confidence"] == 0.93
+    assert uuid.UUID(card["variant_id"])  # round-trippable
 
 
 @pytest.mark.asyncio
