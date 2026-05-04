@@ -60,6 +60,9 @@ ml/data/scraped/
 !ml/data/**/.gitkeep
 !ml/tests/fixtures/
 
+# scratch smoke-test fixtures (one-off, not for commit)
+ml/.tmp_smoke/
+
 # logs
 logs/
 *.log
