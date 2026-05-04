@@ -6,9 +6,64 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ---
 
-## Now — do next (1 session each)
+## Status snapshot (2026-05-04)
 
-> **Status as of 2026-04-30 (late session)**: Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for both MTG (Scryfall, paginated + bulk) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) are committed. Public cert page (`/cert/[id]`) is live, paired with the new owner-side capture wizard at `/grade/[id]` — the product now has a complete end-to-end input → output surface in apps/web. Per-variant exemplar accumulator from PSA ingest is in place — every PSA-graded card we identify becomes a new authentic exemplar that bumps embedding-anomaly's confidence ramp over time. Bulk-data Scryfall ingest now usable for full-catalog (~85k printings) sweeps. Real training of the ML heads stays data-blocked on PSA corpus growth + variant-linkage work.
+Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) committed. Public cert page (`/cert/[id]`) and owner-side capture wizard (`/grade/[id]`) live — complete in→out surface in apps/web. Daily data flywheel runs as a 3-step launchd chain (ingest → re-embed references → accumulate exemplars). Counterfeit-threshold recalibration tool ships; awaiting a labeled counterfeit slice to flip from authentic-only to two-sided mode. The system is ~30% to production MVP; ML heads stay data-blocked on PSA corpus growth + variant linkage.
+
+### What's shipped (production-ready)
+
+| Component | State | Notes |
+|---|---|---|
+| Quality gating | ✅ Production | Per-shot-kind blur/glare/perspective thresholds |
+| Card detection + dewarp | ✅ Production | YOLOv11-seg + Canny+contour fallback; canonical 750×1050 |
+| Card identification | ✅ Production | pHash/dHash + DinoV2 embedder; pgvector NN |
+| Centering grading | ✅ Production | Geometric, ~99% by construction |
+| Edges grading v1 | ✅ Production | MAD anomaly; worse-face dominates |
+| Counterfeit rosette | ✅ Production (synthetic) | FFT halftone signature |
+| Counterfeit color | ✅ Production (synthetic) | CIELAB chroma after WB calibration |
+| Counterfeit embedding-anomaly | ✅ Production (limited) | Gracefully abstains on no-refs |
+| Manufacturer reference flywheel | ✅ Production | Scryfall (paginated + bulk) + PokemonTCG.io |
+| PSA daily ingest + exemplar accumulator | ✅ Production | 3-step launchd chain via `daily_cycle.sh` |
+| Counterfeit threshold recalibration tool | ✅ Production | `evaluation.counterfeit_recalibration` |
+| Web capture wizard | ✅ MVP | 6-shot flow (front + back + 4 corners) |
+| Public cert page + identified card | ✅ MVP | ISR; `(manufacturer, variant_id, name, set, no.)` surfaced |
+| Celery pipeline orchestrator | ✅ Production | Soft-fail on missing stages |
+| Postgres schema + migrations | ✅ Production | 8 tables; AST parity test |
+| S3 / MinIO integration | ✅ Production | Presigned URLs |
+
+### What's MVP / skeleton (works, rough edges)
+
+| Component | State | Notes |
+|---|---|---|
+| Counterfeit ensemble | ⚠️ MVP (3/7) | Rosette + color + embedding wired |
+| Web UI | ⚠️ MVP | No design polish; no Clerk integration |
+| Corners trainer | ⚠️ Skeleton | Refuses to train < 200 samples |
+| Surface trainer | ⚠️ Skeleton | Default mask loader returns background |
+| Identification trainer | ⚠️ Skeleton | Lacks variant linkage for supervised triplet loss |
+| Detection trainer | ⚠️ Skeleton | Manifest builder ready; not trained |
+| Edges grading | ⚠️ MVP | Only synthetic-calibrated confidence |
+
+### What's stubbed / missing
+
+| Feature | Gap | Impact |
+|---|---|---|
+| Corners + surface grading models | Real training data | Pipeline returns NULL grades |
+| Typography detector (#5) | OCR dependency | Out of 7-detector ensemble |
+| Substrate / paper detector (#6) | Flash-shot labeled dataset | Out of 7-detector ensemble |
+| Holographic parallax (#3) | Tilt shot in capture flow | Out of 7-detector ensemble |
+| Stripe payments | Integration not wired | Blocks paid-tier feature |
+| TCGplayer pricing comps | Integration not wired | No EV calculations |
+| Clerk JWT swap (web) | Boilerplate | Dev mode only |
+| Terraform prod infra | AWS account setup | Only dev docker-compose exists |
+| Mobile app | Phase 2 | Out of MVP scope |
+| Real-data threshold calibration | ~300 labeled cards | Tool ready; corpus needed |
+| Catalog DB-side ingest | No JSONL → SQL job | `card_variants` empty in real envs |
+| MLflow model registry | No deployment plumbing | Weights local-only |
+| GDPR data export / RTBF | Not implemented | Needed for paid tier |
+
+---
+
+## Now — do next (1 session each)
 
 - [ ] **First real corners trainer run** (when corpus crosses 200 samples)
   - At current ingest rate (~30-50/day), expected ~3-5 days from 2026-04-29
@@ -23,14 +78,21 @@ Each item has enough context to pick it up cold without reloading session state.
   - **Tool now ships** (`evaluation.counterfeit_recalibration`, 97e3f71): given a labeled corpus, recommends per-detector AUTHENTIC + COUNTERFEIT thresholds via Youden's-J + an FPR-budget cap, emits a drop-in patch block for `ensemble.py`. Runs in `authentic_only` mode against `~/psa_data/scraped.jsonl` alone (the steady state once the daily accumulator has been running) — picks the AUTHENTIC threshold, leaves COUNTERFEIT alone until fakes appear. Switches to `two_sided` once a `--csv` of counterfeits is supplied.
   - Remaining work is operational: source the counterfeit slice (manual curation or a small purchase set), run the tool, paste the patch, re-run the benchmark, lock + version in `model_versions` metadata. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) stays the regression gate.
 
----
+- [ ] **Fix broker-failure path on submit** — submissions silently strand if Celery is down
+  - `apps/api/grader/routers/submissions.py:237-251` flips the row to `PROCESSING` then calls `process_submission.delay(...)`. On broker exception it swallows, sets `task_id=None`, returns 202.
+  - The promised reconciler ("the worker will pick it up via the periodic reconciliation task") doesn't exist — no scheduled beat, no orphan scan. Submissions sit in `PROCESSING` forever; the wizard's status poll spins indefinitely.
+  - Pick one: (a) revert status to `CAPTURING` on `Exception` so the user can retry, (b) build the orphan-scan reconciler beat (60s, scan PROCESSING > N min with no audit-log progress).
+  - Option (a) is small + immediate; (b) is the proper fix.
 
-## Soon — parallel-agent friendly (file-disjoint, no user input needed)
+- [ ] **Catalog DB-side ingest job** — JSONL → `card_variants` upserts
+  - On-disk reference library at `~/manufacturer_refs/<manufacturer>/<variant_id>/` is populated by Scryfall + PokemonTCG ingests (~25k MTG / ~16k Pokemon printings reachable). The SQL `card_variants` table (`db/models.py:111`) — what the pgvector identification path queries at submission time — is **only populated by tests**.
+  - In real environments the identification lookup queries an empty table. The manufacturer reference flywheel and the production identification path run on different data stores.
+  - Fix: a daily upsert job that walks the references JSONL + `reference_embeddings.npz` and writes `CardVariant` rows with `canonical_image_embedding` + `canonical_phash` set. Belongs alongside the existing `daily_cycle.sh` chain.
 
-- [x] **Run accumulator against the live PSA corpus — wired into launchd** (2026-05-04, faea7d6)
-  - Daily cycle now runs as a 3-step chain via `ml/scripts/daily_cycle.sh`: (1) `psa_daily_ingest` drains the PSA Public API daily budget, (2) `embed_references` embeds any newly-added manufacturer references, (3) `accumulate_psa_exemplars` walks today's matched records and appends them as authentic exemplars to `reference_embeddings.npz`. Steps run independently (non-zero rc on one doesn't block the others); per-step `rc=N` lines land in `~/psa_data/launchd.stdout.log` so a failed step is triageable. The launchd plist (`com.projectgrader.psa-ingest.plist`) just hands off to the wrapper; redeploy on the macOS prod box (`launchctl unload && cp && launchctl load`).
-  - First-cycle smoke: most records land in `skipped_unidentified` until catalog coverage grows — that's the expected baseline. Watch `wc -l ~/manufacturer_refs/psa_exemplars_log.jsonl` to confirm appends are happening; per-variant exemplar count drives embedding-anomaly's confidence ramp over time.
-  - Windows operation documented in `ml/scripts/README.md` (Task Scheduler via a `daily_cycle.cmd` wrapper) for the dev box.
+- [ ] **Add `front_full_flash` + `tilt_30` to the capture wizard**
+  - `apps/web/lib/submission.ts:28-36` already declares both as valid `ShotKind`s, but `apps/web/app/grade/[id]/page.tsx:60-97` only walks front + back + 4 corners.
+  - Surface defect detector wants flash shots; holographic-parallax detector wants tilt — both are blocked at the **capture step** before any ML work.
+  - Adding two optional shots to the wizard unblocks two future detectors with no ML work. Pure UI.
 
 ---
 
@@ -51,6 +113,14 @@ Each item has enough context to pick it up cold without reloading session state.
   - Local-disk default works fine for dev (`~/manufacturer_refs/reference_embeddings.npz`).
   - In prod the API workers + Celery workers all need read access. Options: (a) bake into the Docker image (~100 MB at 25k variants × 768 floats), (b) S3 + boot-time download to a shared volume, (c) S3 + per-call lazy download with LRU cache, (d) FAISS index + a sidecar service.
   - Pick when API is being containerized for real (currently only docker-compose dev).
+
+- [ ] **"Preliminary final grade" stance**
+  - `apps/api/grader/services/grading.py:154-169` — `compute_psa_final` returns `None` if any of (centering, corners, edges, surface) is missing. Corners + surface are skeletons → **every Phase-1 cert renders without a final grade by design**.
+  - Correct philosophy ("never fabricate a grade we can't justify") but a real product implication.
+  - Decision: ship a labeled `min(centering, edges)` "preliminary" with caveat, OR hold the partial-grade UX line until corners + surface land.
+
+- [ ] **PSA paid API tier**
+  - Free is 100 calls/day; once that becomes the bottleneck on corpus growth, email `webcert@collectors.com` to upgrade. Mostly a calendar-time decision driven by training-corpus size hitting ceilings.
 
 ---
 
@@ -76,10 +146,7 @@ Each item has enough context to pick it up cold without reloading session state.
 
 - [ ] **Stripe payments** — free 5/mo, $10/mo unlimited. Webhook handler for subscription lifecycle.
 - [ ] **TCGplayer pricing comps** — pull current market price on identified-variant. Show predicted-grade-adjusted EV (`Σ P(grade) × median_price(grade)`).
-- [ ] **MTG catalog ingestion (DB-side)** — populate `card_variants` from Scryfall. Distinct from the manufacturer reference scrape: this is the SQL catalog the API queries at submission time, vs. the on-disk reference image library used by counterfeit detectors. Daily refresh job.
-- [ ] **Pokemon catalog ingestion (DB-side)** — same pattern, PokemonTCG.io as source.
 - [ ] **Real production deploy** — Aurora Postgres, ElastiCache, ECS Fargate API, EKS GPU workers, Triton inference, MLflow registry. Build out via Terraform after dev env exists.
-- [ ] **CI** — GitHub Actions: `uv sync && pytest` on each PR for `apps/api` and `ml`. Type-check + lint gates. Coverage tracking.
 
 ---
 
@@ -96,10 +163,41 @@ Each item has enough context to pick it up cold without reloading session state.
 ## Operational hygiene (continuous)
 
 - [x] **Counterfeit benchmark — v1 corpus + harness** (committed 6823e48). Run: `python -m evaluation.counterfeit_benchmark`. Current: 50-sample synthetic corpus, rosette 98% accuracy / color 100% / ensemble 98%. **Still TODO**: extend with embedding-anomaly cases (needs labeled identified-variant samples), swap in real images as the corpus grows, then add the hard CI gate (recall ≥ 90% / FPR ≤ 2%).
-- [ ] **Manufacturer reference re-embed cycle** — after each new Scryfall / PokemonTCG ingest run, re-run `python -m scripts.embed_references` so newly-ingested variants land in `reference_embeddings.npz` and become eligible for embedding-anomaly. Idempotent by `(manufacturer, variant_id)` key; the pass is fast for incremental adds.
+- [x] **Manufacturer reference re-embed cycle** — runs as step 2 of `ml/scripts/daily_cycle.sh` (faea7d6). Idempotent on `(manufacturer, variant_id)`; a no-op on days with no new ingest.
+- [ ] **Consolidate `_ML_ROOT = parents[4]/"ml"` sys.path bootstrap** — `services/{grading,identification,counterfeit}.py` and `workers/pipeline_runner.py` each repeat the same depth-counting block. Footgun on the first file move. Fix: a single helper module imported once, OR `uv add` the `ml` package in editable mode.
+- [ ] **GitHub Actions CI** — `uv sync && pytest` for `apps/api` and `ml`. Type-check + lint gates. Coverage tracking. Currently merges to `main` are ungated.
 - [ ] Public accuracy benchmark — predictions vs subsequent PSA grades, published monthly (trust-strategy item from plan).
 - [ ] Capture-guidance acceptance test — real users on mid-range phones; rejection rate and retakes/submission. Target <2 retakes median.
 - [ ] Latency SLO monitoring — p95 ≤ 20s, p99 ≤ 35s (Datadog dashboards + PagerDuty alerts).
+
+---
+
+## Dependency graph for upcoming milestones
+
+```
+Corpus ≥ 200 samples (~3-5 days from 2026-04-29)
+└─ First corners trainer end-to-end run (1 day)
+   └─ Surface + edges models improve (2-3 weeks real training)
+
+Counterfeit slice sourced (~300 labeled cards)
+└─ Recalibration tool flips authentic-only → two-sided
+   └─ Lock thresholds + version in model_versions
+
+Catalog DB-side ingest (2-3 days)
+└─ pgvector identification accuracy unlocked (no longer querying empty table)
+
+Variant linkage (PSA records ↔ Scryfall/PokemonTCG, ~1 week, research-heavy)
+└─ DinoV2 supervised triplet loss → identification accuracy
+
+Clerk SDK swap (2 hours) + Stripe (3-4 days)
+└─ Real signups + monetization
+
+Terraform prod (1-2 weeks, AWS setup required)
+└─ Datadog + SLOs
+
+Flash-shot dataset + substrate detector (4-6 weeks, hardware-dependent)
+└─ 6/7 ensemble complete → ship MVP to beta
+```
 
 ---
 
