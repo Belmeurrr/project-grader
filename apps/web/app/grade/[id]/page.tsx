@@ -44,6 +44,8 @@ import {
   getSubmission,
   submitForGrading,
   uploadShot,
+  useAuthedFetch,
+  type AuthedFetch,
 } from "@/lib/submission";
 
 // --------------------------------------------------------------------------
@@ -121,6 +123,7 @@ export default function GradePage({
 }) {
   const { id } = use(params);
   const router = useRouter();
+  const authedFetch = useAuthedFetch();
 
   const [submission, setSubmission] = useState<SubmissionOut | null | undefined>(
     undefined,
@@ -129,12 +132,12 @@ export default function GradePage({
 
   const refresh = useCallback(async () => {
     try {
-      const sub = await getSubmission(id);
+      const sub = await getSubmission(authedFetch, id);
       setSubmission(sub);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [id]);
+  }, [id, authedFetch]);
 
   useEffect(() => {
     void refresh();
@@ -175,6 +178,7 @@ export default function GradePage({
       {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
       <Body
         submission={submission}
+        authedFetch={authedFetch}
         onShotsChanged={refresh}
         onSubmitted={refresh}
       />
@@ -229,10 +233,12 @@ function StatusPill({ status }: { status: SubmissionStatus }) {
 
 function Body({
   submission,
+  authedFetch,
   onShotsChanged,
   onSubmitted,
 }: {
   submission: SubmissionOut;
+  authedFetch: AuthedFetch;
   onShotsChanged: () => Promise<void>;
   onSubmitted: () => Promise<void>;
 }) {
@@ -266,6 +272,7 @@ function Body({
   return (
     <Wizard
       submissionId={submission.id}
+      authedFetch={authedFetch}
       onShotsChanged={onShotsChanged}
       onSubmitted={onSubmitted}
     />
@@ -284,10 +291,12 @@ type ShotState =
 
 function Wizard({
   submissionId,
+  authedFetch,
   onShotsChanged,
   onSubmitted,
 }: {
   submissionId: string;
+  authedFetch: AuthedFetch;
   onShotsChanged: () => Promise<void>;
   onSubmitted: () => Promise<void>;
 }) {
@@ -334,7 +343,7 @@ function Wizard({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await submitForGrading(submissionId);
+      await submitForGrading(authedFetch, submissionId);
       await onSubmitted();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -363,6 +372,7 @@ function Wizard({
             onActivate={() => setActiveKind(cfg.kind)}
             onCancel={() => setActiveKind(null)}
             submissionId={submissionId}
+            authedFetch={authedFetch}
             onUploading={() => onShotUploading(cfg.kind)}
             onResult={(r) => onShotResult(cfg.kind, r)}
             onError={(m) => onShotError(cfg.kind, m)}
@@ -406,6 +416,7 @@ function ShotRow({
   onActivate,
   onCancel,
   submissionId,
+  authedFetch,
   onUploading,
   onResult,
   onError,
@@ -416,6 +427,7 @@ function ShotRow({
   onActivate: () => void;
   onCancel: () => void;
   submissionId: string;
+  authedFetch: AuthedFetch;
   onUploading: () => void;
   onResult: (r: ShotOut) => void;
   onError: (msg: string) => void;
@@ -475,6 +487,7 @@ function ShotRow({
       {isActive && (
         <CaptureSurface
           submissionId={submissionId}
+          authedFetch={authedFetch}
           kind={cfg.kind}
           onCancel={onCancel}
           onUploading={onUploading}
@@ -498,6 +511,7 @@ function ShotRow({
 
 function CaptureSurface({
   submissionId,
+  authedFetch,
   kind,
   onCancel,
   onUploading,
@@ -505,6 +519,7 @@ function CaptureSurface({
   onError,
 }: {
   submissionId: string;
+  authedFetch: AuthedFetch;
   kind: ShotKind;
   onCancel: () => void;
   onUploading: () => void;
@@ -594,7 +609,12 @@ function CaptureSurface({
     if (!previewBlob) return;
     onUploading();
     try {
-      const result = await uploadShot(submissionId, kind, previewBlob);
+      const result = await uploadShot(
+        authedFetch,
+        submissionId,
+        kind,
+        previewBlob,
+      );
       onResult(result);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));

@@ -9,12 +9,21 @@
  * `apps/api/grader/schemas/submissions.py`. Keep in sync by hand for
  * now; openapi-typescript codegen is a future task.
  *
- * Auth: dev mode (settings.dev_auth_enabled) accepts
- * `Authorization: Dev <clerk_id>`. Production wires Clerk's React SDK
- * and swaps `getDevAuthHeader` for the SDK's session-token getter.
- * The capture wizard hits this client through `authedFetch`, so the
- * swap is one function and one call site.
+ * Auth: production wires Clerk via `useAuthHeader()` (a React hook
+ * that wraps Clerk's `useAuth().getToken()`). When
+ * `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is unset (test/dev), the hook
+ * falls back to `Authorization: Dev <NEXT_PUBLIC_DEV_CLERK_ID>` which
+ * the FastAPI side accepts when `settings.dev_auth_enabled` is true.
+ *
+ * All endpoint helpers here take a `token: string | null` argument so
+ * the call site (a client component) reads the auth header via the
+ * hook and passes it down — keeps these functions hook-free and
+ * therefore safely callable from `useEffect`, event handlers, etc.
  */
+"use client";
+
+import { useAuth } from "@clerk/nextjs";
+import { useCallback } from "react";
 
 export type Game =
   | "pokemon"
@@ -86,14 +95,69 @@ const apiBaseUrl = (): string =>
 
 /**
  * Dev-mode auth header. Reads NEXT_PUBLIC_DEV_CLERK_ID (defaulting to
- * "dev-user" so a fresh checkout works without env config). When real
- * Clerk lands, replace this call site with the Clerk session-token
- * getter — the wizard never reaches into the auth scheme directly.
+ * "dev-user" so a fresh checkout works without env config). The
+ * FastAPI side accepts this when `settings.dev_auth_enabled = true`.
  */
 const getDevAuthHeader = (): string => {
   const id = process.env.NEXT_PUBLIC_DEV_CLERK_ID ?? "dev-user";
   return `Dev ${id}`;
 };
+
+/**
+ * Whether Clerk is configured at all. Used to decide between
+ * `useAuth().getToken()` and the dev-mode fallback. Reading
+ * `process.env.NEXT_PUBLIC_*` at module scope is fine — Next inlines
+ * it at build time.
+ */
+const clerkConfigured = (): boolean =>
+  Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+
+/**
+ * React hook that returns an `authedFetch` bound to the current
+ * Clerk session (or the dev-mode fallback). Must be called from a
+ * client component; the returned `fetch` wrapper itself is plain
+ * async, so passing it down to event handlers / effects is fine.
+ *
+ * In dev/test (no `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`), `useAuth()`
+ * is still safe to call — `<ClerkProvider>` renders a no-op when
+ * unconfigured — but we skip `getToken()` and emit the `Dev <id>`
+ * header instead. This keeps tests/local dev working without
+ * provisioning Clerk keys.
+ */
+export function useAuthedFetch(): (
+  path: string,
+  init?: RequestInit,
+) => Promise<Response> {
+  // `useAuth` is always called (rules of hooks). When Clerk is
+  // unconfigured, `getToken` returns null and we drop into the
+  // dev-mode branch.
+  const { getToken } = useAuth();
+
+  return useCallback(
+    async (path: string, init: RequestInit = {}) => {
+      const url = `${apiBaseUrl()}${path}`;
+      const headers = new Headers(init.headers);
+
+      let authHeader: string;
+      if (clerkConfigured()) {
+        const token = await getToken();
+        authHeader = token ? `Bearer ${token}` : getDevAuthHeader();
+      } else {
+        authHeader = getDevAuthHeader();
+      }
+      headers.set("Authorization", authHeader);
+
+      if (init.body && !headers.has("Content-Type")) {
+        headers.set("Content-Type", "application/json");
+      }
+      headers.set("Accept", "application/json");
+      return fetch(url, { ...init, headers });
+    },
+    [getToken],
+  );
+}
+
+export type AuthedFetch = ReturnType<typeof useAuthedFetch>;
 
 class ApiError extends Error {
   constructor(
@@ -102,20 +166,6 @@ class ApiError extends Error {
   ) {
     super(`api error ${status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   }
-}
-
-async function authedFetch(
-  path: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  const url = `${apiBaseUrl()}${path}`;
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", getDevAuthHeader());
-  if (init.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  headers.set("Accept", "application/json");
-  return fetch(url, { ...init, headers });
 }
 
 async function asJson<T>(res: Response): Promise<T> {
@@ -135,9 +185,10 @@ async function asJson<T>(res: Response): Promise<T> {
 // Submission lifecycle
 // --------------------------------------------------------------------------
 
-export async function createSubmission(opts: {
-  game_hint?: Game;
-} = {}): Promise<SubmissionOut> {
+export async function createSubmission(
+  authedFetch: AuthedFetch,
+  opts: { game_hint?: Game } = {},
+): Promise<SubmissionOut> {
   const res = await authedFetch("/submissions", {
     method: "POST",
     body: JSON.stringify({ game_hint: opts.game_hint ?? null }),
@@ -145,7 +196,10 @@ export async function createSubmission(opts: {
   return asJson<SubmissionOut>(res);
 }
 
-export async function getSubmission(id: string): Promise<SubmissionOut | null> {
+export async function getSubmission(
+  authedFetch: AuthedFetch,
+  id: string,
+): Promise<SubmissionOut | null> {
   const res = await authedFetch(`/submissions/${encodeURIComponent(id)}`);
   if (res.status === 404) return null;
   return asJson<SubmissionOut>(res);
@@ -156,6 +210,7 @@ export async function getSubmission(id: string): Promise<SubmissionOut | null> {
 // --------------------------------------------------------------------------
 
 export async function requestShotUploadUrl(
+  authedFetch: AuthedFetch,
   submissionId: string,
   kind: ShotKind,
   contentType: string,
@@ -192,6 +247,7 @@ export async function uploadShotToS3(
 }
 
 export async function registerShot(
+  authedFetch: AuthedFetch,
   submissionId: string,
   shotId: string,
   s3Key: string,
@@ -207,6 +263,7 @@ export async function registerShot(
 }
 
 export async function submitForGrading(
+  authedFetch: AuthedFetch,
   submissionId: string,
 ): Promise<SubmitResponse> {
   const res = await authedFetch(
@@ -231,14 +288,25 @@ export async function submitForGrading(
  * client to re-PUT.
  */
 export async function uploadShot(
+  authedFetch: AuthedFetch,
   submissionId: string,
   kind: ShotKind,
   blob: Blob,
 ): Promise<ShotOut> {
   const contentType = blob.type || "image/jpeg";
-  const presigned = await requestShotUploadUrl(submissionId, kind, contentType);
+  const presigned = await requestShotUploadUrl(
+    authedFetch,
+    submissionId,
+    kind,
+    contentType,
+  );
   await uploadShotToS3(presigned.upload_url, blob, presigned.required_headers);
-  return registerShot(submissionId, presigned.shot_id, presigned.s3_key);
+  return registerShot(
+    authedFetch,
+    submissionId,
+    presigned.shot_id,
+    presigned.s3_key,
+  );
 }
 
 export { ApiError };

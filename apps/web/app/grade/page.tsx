@@ -16,10 +16,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { ApiError, createSubmission } from "@/lib/submission";
+import { ApiError, createSubmission, useAuthedFetch } from "@/lib/submission";
 
 export default function GradeStartPage() {
   const router = useRouter();
+  const authedFetch = useAuthedFetch();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,7 +28,7 @@ export default function GradeStartPage() {
     setBusy(true);
     setError(null);
     try {
-      const sub = await createSubmission();
+      const sub = await createSubmission(authedFetch);
       router.push(`/grade/${sub.id}`);
     } catch (e) {
       setBusy(false);
