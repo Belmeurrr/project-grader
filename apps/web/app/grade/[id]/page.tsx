@@ -94,6 +94,18 @@ const WIZARD_SHOTS: WizardShot[] = [
     hint: "Zoom on the bottom-left corner.",
     required: false,
   },
+  {
+    kind: "front_full_flash",
+    label: "Flash front",
+    hint: "Front under flash; whole card visible, white-balance steady. Helps the substrate detector.",
+    required: false,
+  },
+  {
+    kind: "tilt_30",
+    label: "Tilt-back front",
+    hint: "Tilt the card ~30° toward you so light catches the holo. Helps the holographic detector.",
+    required: false,
+  },
 ];
 
 // --------------------------------------------------------------------------
