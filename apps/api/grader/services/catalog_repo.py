@@ -19,9 +19,7 @@ performance cost is negligible compared to the actual model inference)."""
 from __future__ import annotations
 
 import asyncio
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -29,16 +27,11 @@ from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from grader.db.models import CardVariant
-
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification.catalog import (  # noqa: E402
+from pipelines.identification.catalog import (
     CardCatalogEntry,
     CatalogHit,
 )
-from pipelines.identification.hashing import HASH_BITS  # noqa: E402
+from pipelines.identification.hashing import HASH_BITS
 
 _SIGNED_64_OFFSET = 1 << 64
 _SIGNED_64_MAX = (1 << 63) - 1

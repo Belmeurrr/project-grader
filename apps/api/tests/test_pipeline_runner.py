@@ -8,7 +8,6 @@ not lost task results."""
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -36,18 +35,13 @@ from grader.db.models import (
 from grader.services import storage
 from grader.settings import get_settings
 from grader.workers.pipeline_runner import PipelineValidationError, run_pipeline
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification import (  # noqa: E402
+from pipelines.identification import (
     CardCatalogEntry,
     InMemoryCatalogIndex,
     SimpleEmbedder,
     compute_phash,
 )
-from tests.fixtures import card_in_scene, encode_jpeg, synth_card  # noqa: E402
+from tests.fixtures import card_in_scene, encode_jpeg, synth_card
 
 
 @pytest.fixture(autouse=True)

@@ -5,9 +5,7 @@ two's-complement bigint round-trip helpers."""
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,12 +17,7 @@ from grader.services.catalog_repo import (
     signed_to_unsigned_64,
     unsigned_to_signed_64,
 )
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification.hashing import HASH_BITS  # noqa: E402
+from pipelines.identification.hashing import HASH_BITS
 
 
 # -----------------------------

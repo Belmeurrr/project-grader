@@ -7,10 +7,8 @@ variant + confidence on the submission, and writes an audit_log row."""
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 
 import boto3
 import cv2
@@ -23,18 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from grader.db.models import AuditLog, Submission, SubmissionStatus, User
 from grader.services import identification, storage
 from grader.settings import get_settings
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification import (  # noqa: E402
+from pipelines.identification import (
     CardCatalogEntry,
     InMemoryCatalogIndex,
     SimpleEmbedder,
     compute_phash,
 )
-from tests.fixtures import card_in_scene, synth_card  # noqa: E402
+from tests.fixtures import card_in_scene, synth_card
 
 
 @pytest.fixture(autouse=True)

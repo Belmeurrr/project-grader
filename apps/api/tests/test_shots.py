@@ -7,10 +7,8 @@ the submission_shots row."""
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 
 import boto3
 import httpx
@@ -19,12 +17,7 @@ from moto import mock_aws
 
 from grader.services import storage
 from grader.settings import get_settings
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from tests.fixtures import (  # noqa: E402  (path setup above)
+from tests.fixtures import (
     blurry,
     card_in_scene,
     encode_jpeg,

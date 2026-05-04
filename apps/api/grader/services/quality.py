@@ -17,24 +17,14 @@ The grading pipeline only runs when *every* required shot has
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
 
 from grader.db.models import ShotKind
 from grader.services import storage
-
-# Pipelines are inside ml/, which is a separate package outside apps/api/.
-# In dev/test we add ml/ to sys.path; in prod the worker container bundles
-# ml/ via Docker COPY.
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.quality import QualityReport, evaluate_shot  # noqa: E402
+from pipelines.quality import QualityReport, evaluate_shot
 
 
 @dataclass(frozen=True)

@@ -14,10 +14,8 @@ detection + dewarp persists `canonical/<kind>.png`. The function:
 
 from __future__ import annotations
 
-import sys
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -25,12 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from grader.db.models import AuditLog, Submission
 from grader.services import storage
-
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification import (  # noqa: E402
+from pipelines.identification import (
     CatalogIndex,
     IdentificationResult,
     ImageEmbedder,

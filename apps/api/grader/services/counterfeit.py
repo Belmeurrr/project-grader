@@ -16,7 +16,6 @@ calls `analyze_rosette` then `persist_authenticity_result`."""
 
 from __future__ import annotations
 
-import sys
 import uuid
 from pathlib import Path
 
@@ -25,27 +24,22 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from data.ingestion.reference_embeddings import lookup_references
 from grader.db.models import AuthenticityResult, AuthenticityVerdict
 from grader.services import storage
-
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.counterfeit.color import (  # noqa: E402
+from pipelines.counterfeit import ensemble
+from pipelines.counterfeit.color import (
     ColorProfileMeasurement,
     measure_color_profile,
 )
-from pipelines.counterfeit.embedding_anomaly import (  # noqa: E402
+from pipelines.counterfeit.embedding_anomaly import (
     EmbeddingAnomalyMeasurement,
     measure_embedding_anomaly,
 )
-from pipelines.counterfeit.rosette import (  # noqa: E402
+from pipelines.counterfeit.rosette import (
     RosetteMeasurement,
     measure_rosette,
 )
-from pipelines.counterfeit import ensemble  # noqa: E402
-from data.ingestion.reference_embeddings import lookup_references  # noqa: E402
 
 # Re-export thresholds + verdict logic from the ml-side ensemble module
 # so existing imports (tests, etc.) keep working without reaching into

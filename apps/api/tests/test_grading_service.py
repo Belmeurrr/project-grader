@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 
 import boto3
 import cv2
@@ -18,12 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from grader.db.models import Grade, GradingScheme, Submission, SubmissionStatus, User
 from grader.services import grading, storage
 from grader.settings import get_settings
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from tests.fixtures import (  # noqa: E402
+from tests.fixtures import (
     canonical_clean,
     canonical_with_edge_defect,
     synth_card,

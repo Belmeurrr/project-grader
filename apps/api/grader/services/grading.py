@@ -13,10 +13,8 @@ that as "partial grade" rather than fabricating a number.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -25,17 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from grader.db.models import Grade, GradingScheme, ShotKind, SubmissionShot
 from grader.services import storage
-
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.grading.centering import (  # noqa: E402
+from pipelines.grading.centering import (
     CenteringMeasurement,
     measure_centering,
     psa_subgrade_from_ratios,
 )
-from pipelines.grading.edges import (  # noqa: E402
+from pipelines.grading.edges import (
     EdgeMeasurement,
     measure_edges,
 )

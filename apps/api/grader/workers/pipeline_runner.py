@@ -21,12 +21,10 @@ that already have an event loop and a session).
 from __future__ import annotations
 
 import asyncio
-import sys
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,12 +41,7 @@ from grader.db.models import (
 )
 from grader.services import counterfeit, detection, grading, identification
 from grader.settings import get_settings
-
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification import (  # noqa: E402
+from pipelines.identification import (
     CatalogIndex,
     ImageEmbedder,
 )

@@ -14,9 +14,7 @@ Retry policy:
 from __future__ import annotations
 
 import logging
-import sys
 import uuid
-from pathlib import Path
 
 from celery import shared_task
 from celery.exceptions import Reject
@@ -28,12 +26,7 @@ from grader.workers.pipeline_runner import (
     PipelineValidationError,
     run_pipeline_sync,
 )
-
-_ML_ROOT = Path(__file__).resolve().parents[4] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from pipelines.identification import (  # noqa: E402
+from pipelines.identification import (
     CatalogIndex,
     ImageEmbedder,
     SimpleEmbedder,

@@ -8,10 +8,8 @@ actually dispatching."""
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 from unittest.mock import patch
 
 import boto3
@@ -22,12 +20,7 @@ from moto import mock_aws
 from grader.db.models import ShotKind, SubmissionStatus
 from grader.services import storage
 from grader.settings import get_settings
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from tests.fixtures import card_in_scene, encode_jpeg  # noqa: E402
+from tests.fixtures import card_in_scene, encode_jpeg
 
 
 @pytest.fixture(autouse=True)

@@ -4,7 +4,6 @@ and the ml/pipelines/counterfeit/rosette module."""
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,24 +13,19 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from grader.db.models import AuthenticityVerdict
 from grader.services import counterfeit, storage
 from grader.settings import get_settings
-
-_ML_ROOT = Path(__file__).resolve().parents[3] / "ml"
-if str(_ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ML_ROOT))
-
-from tests.fixtures import (  # noqa: E402
+from pipelines.counterfeit.color import (
+    ColorProfileMeasurement,
+)
+from pipelines.counterfeit.rosette import (
+    RosetteMeasurement,
+)
+from tests.fixtures import (
     synth_card,
     synth_continuous_tone_card,
     synth_halftone_card,
-)
-from grader.db.models import AuthenticityVerdict  # noqa: E402
-from pipelines.counterfeit.color import (  # noqa: E402
-    ColorProfileMeasurement,
-)
-from pipelines.counterfeit.rosette import (  # noqa: E402
-    RosetteMeasurement,
 )
 
 
