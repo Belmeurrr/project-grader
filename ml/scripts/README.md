@@ -136,6 +136,62 @@ rm -rf ~/psa_data
 launchctl load ~/Library/LaunchAgents/com.projectgrader.psa-ingest.plist
 ```
 
+## Windows operation
+
+`daily_cycle.sh` is portable bash and runs unchanged under **Git Bash** (bundled with Git for Windows). Only the scheduler differs from macOS — Task Scheduler replaces launchd.
+
+### Setup
+
+1. Install Python deps against the system Python launcher:
+
+   ```powershell
+   py -m pip install --user "httpx>=0.27.0" "numpy>=2.1" "opencv-python-headless>=4.10" "pillow>=11.0"
+   ```
+
+2. Create a project-root `.env` (same fields as the macOS [One-time setup](#one-time-setup)). `$HOME` in Git Bash maps to your Windows user profile.
+
+3. Smoke-test from Git Bash in the repo root:
+
+   ```bash
+   PROJECT_ROOT="$(pwd)" PYTHON="/c/Windows/py.exe" ml/scripts/daily_cycle.sh
+   ```
+
+   (Or point `PYTHON` at a venv's `Scripts/python.exe`.)
+
+### Daily schedule via Task Scheduler
+
+Create a small batch wrapper `daily_cycle.cmd` somewhere stable — schtasks `/TR` arguments get hairy with embedded quoting, so a wrapper file is much easier to debug than inlining the bash invocation:
+
+```bat
+@echo off
+"C:\Program Files\Git\bin\bash.exe" -lc "PROJECT_ROOT='/c/Users/<you>/path/to/project-grader' /c/Users/<you>/path/to/project-grader/ml/scripts/daily_cycle.sh >> $HOME/psa_data/launchd.stdout.log 2>> $HOME/psa_data/launchd.stderr.log"
+```
+
+Register the task (PowerShell, no admin required for a per-user task):
+
+```powershell
+schtasks /Create /TN "ProjectGrader\DailyCycle" /SC DAILY /ST 09:00 /TR "C:\path\to\daily_cycle.cmd" /F
+```
+
+Common operations:
+
+| Action | Command |
+|---|---|
+| Trigger now | `schtasks /Run /TN "ProjectGrader\DailyCycle"` |
+| Pause | `schtasks /Change /TN "ProjectGrader\DailyCycle" /DISABLE` |
+| Resume | `schtasks /Change /TN "ProjectGrader\DailyCycle" /ENABLE` |
+| Delete | `schtasks /Delete /TN "ProjectGrader\DailyCycle" /F` |
+| Inspect run history | `taskschd.msc` → find the task → History tab |
+
+**Caveats**:
+
+- The task fires only while the user is logged in. Don't switch to `/RU SYSTEM` — it can't see your user-profile `.env`.
+- If the machine is asleep at 09:00 the run is missed. Tick *"Run task as soon as possible after a scheduled start is missed"* in `taskschd.msc` → task → Settings if you want catch-up runs.
+
+### Alternative — WSL2 + cron
+
+If WSL2 is already running, the macOS flow works almost unchanged: `apt install python3-pip`, `pip install --user` the same deps, `sudo service cron start`, then a crontab entry pointing at `/mnt/c/.../daily_cycle.sh`. Cron only fires while the WSL distro is running, so Task Scheduler is more reliable for an unattended cycle.
+
 ## `psa_one_cert_smoke.py` — stdlib-only one-cert validation
 
 Validates a single cert against the API without needing httpx. Useful for sanity checks. See the script's docstring for usage.
