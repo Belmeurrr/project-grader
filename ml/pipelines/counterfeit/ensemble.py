@@ -23,6 +23,7 @@ from typing import Iterable
 from pipelines.counterfeit.color import ColorProfileMeasurement
 from pipelines.counterfeit.embedding_anomaly import EmbeddingAnomalyMeasurement
 from pipelines.counterfeit.rosette import RosetteMeasurement
+from pipelines.counterfeit.typography import TypographyResult
 
 
 # String values for verdicts. Match the apps/api SQLAlchemy enum's
@@ -78,6 +79,19 @@ EMBEDDING_MIN_CONFIDENCE: float = 0.4
 EMBEDDING_MODEL_VERSION: str = "centroid-cosine-v1"
 
 
+# Typography detector. Score is a logistic of the normalized Levenshtein
+# distance between OCR'd title text and the identified card name.
+# Counterfeiters consistently get fonts subtly wrong; even pure OCR-
+# similarity (no per-glyph template matching yet) carries signal. The
+# detector self-abstains when (a) RapidOCR isn't installed, (b) no
+# expected name from identification, or (c) OCR fails on the input.
+# Synthetic placeholders — recalibration tool ratchets them later.
+TYPOGRAPHY_AUTHENTIC_THRESHOLD: float = 0.65
+TYPOGRAPHY_COUNTERFEIT_THRESHOLD: float = 0.35
+TYPOGRAPHY_MIN_CONFIDENCE: float = 0.4
+TYPOGRAPHY_MODEL_VERSION: str = "ocr-levenshtein-v1"
+
+
 # --------------------------------------------------------------------------
 # Per-detector verdict mappers
 # --------------------------------------------------------------------------
@@ -110,6 +124,27 @@ def verdict_from_color_profile(m: ColorProfileMeasurement) -> str:
     if m.color_score >= COLOR_AUTHENTIC_THRESHOLD:
         return VERDICT_AUTHENTIC
     if m.color_score < COLOR_COUNTERFEIT_THRESHOLD:
+        return VERDICT_LIKELY_COUNTERFEIT
+    return VERDICT_SUSPICIOUS
+
+
+def verdict_from_typography(score: float, confidence: float) -> str:
+    """Tri-state verdict for the typography detector.
+
+    UNVERIFIED when the detector abstained (OCR lib missing, no
+    expected name from identification, OCR failed) — encoded as
+    confidence < TYPOGRAPHY_MIN_CONFIDENCE. Above the AUTHENTIC
+    threshold → AUTHENTIC. Below the COUNTERFEIT threshold →
+    LIKELY_COUNTERFEIT. Between → SUSPICIOUS.
+
+    Takes (score, confidence) directly rather than a TypographyResult
+    so the benchmark and the apps/api wrapper can call this with the
+    same signature shape that the recalibration tool consumes."""
+    if confidence < TYPOGRAPHY_MIN_CONFIDENCE:
+        return VERDICT_UNVERIFIED
+    if score >= TYPOGRAPHY_AUTHENTIC_THRESHOLD:
+        return VERDICT_AUTHENTIC
+    if score < TYPOGRAPHY_COUNTERFEIT_THRESHOLD:
         return VERDICT_LIKELY_COUNTERFEIT
     return VERDICT_SUSPICIOUS
 
@@ -188,9 +223,14 @@ __all__ = [
     "EMBEDDING_COUNTERFEIT_THRESHOLD",
     "EMBEDDING_MIN_CONFIDENCE",
     "EMBEDDING_MODEL_VERSION",
+    "TYPOGRAPHY_AUTHENTIC_THRESHOLD",
+    "TYPOGRAPHY_COUNTERFEIT_THRESHOLD",
+    "TYPOGRAPHY_MIN_CONFIDENCE",
+    "TYPOGRAPHY_MODEL_VERSION",
     # Logic
     "verdict_from_rosette",
     "verdict_from_color_profile",
     "verdict_from_embedding_anomaly",
+    "verdict_from_typography",
     "combine_verdicts",
 ]

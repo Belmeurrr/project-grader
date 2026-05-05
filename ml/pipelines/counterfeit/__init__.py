@@ -13,6 +13,10 @@ from pipelines.counterfeit.rosette import (
     is_likely_authentic,
     measure_rosette,
 )
+from pipelines.counterfeit.typography import (
+    TypographyResult,
+    analyze_typography,
+)
 
 __all__ = [
     # Rosette (FFT halftone) — ensemble detector #2 in the manifest order
@@ -24,6 +28,9 @@ __all__ = [
     # Color profile (CIELAB chroma + white-balance) — ensemble detector #4
     "ColorProfileMeasurement",
     "measure_color_profile",
+    # Typography (OCR + Levenshtein vs identified name) — #5
+    "TypographyResult",
+    "analyze_typography",
     # Embedding anomaly (cosine distance from authentic centroid) — #7
     "EmbeddingAnomalyMeasurement",
     "measure_embedding_anomaly",

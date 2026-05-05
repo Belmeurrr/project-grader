@@ -173,6 +173,130 @@ def test_analyze_color_profile_raises_on_too_small_canonical(s3_bucket: str) -> 
 
 
 # -----------------------------
+# analyze_typography_service — abstain paths and image-load envelope
+# -----------------------------
+
+
+def test_analyze_typography_service_abstains_on_missing_card_name(
+    s3_bucket: str,
+) -> None:
+    """No identified card name → no comparison possible → abstain
+    (UNVERIFIED). Documents the design that the typography detector
+    never raises; abstain is encoded as confidence=0."""
+    key = "test/canonical_typography_unidentified.png"
+    _put_canonical(s3_bucket, key, synth_card())
+    r = counterfeit.analyze_typography_service(key, identified_card_name=None)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "no_expected_text"
+    # Verdict mapper turns confidence=0 → UNVERIFIED.
+    assert (
+        counterfeit._verdict_from_typography(r) == AuthenticityVerdict.UNVERIFIED
+    )
+
+
+def test_analyze_typography_service_abstains_on_blank_card_name(
+    s3_bucket: str,
+) -> None:
+    key = "test/canonical_typography_blank.png"
+    _put_canonical(s3_bucket, key, synth_card())
+    r = counterfeit.analyze_typography_service(key, identified_card_name="   ")
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "no_expected_text"
+
+
+def test_analyze_typography_service_does_not_raise_on_corrupt_bytes(
+    s3_bucket: str,
+) -> None:
+    """The typography service swallows S3/load errors and abstains —
+    a bad canonical should never take down the counterfeit ensemble.
+    Distinct from `analyze_rosette` which raises CounterfeitFailedError
+    (the orchestrator's stage-3.5 try/except catches that)."""
+    key = "test/bad-typography.png"
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=s3_bucket, Key=key, Body=b"not a png", ContentType="image/png"
+    )
+    r = counterfeit.analyze_typography_service(key, identified_card_name="Lightning Bolt")
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "invalid_image"
+
+
+def test_analyze_typography_service_happy_path_returns_populated_result(
+    s3_bucket: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When OCR is available and the image loads cleanly, the service
+    returns a populated TypographyResult (non-zero confidence, non-None
+    extracted_text). Stub the OCR loader to avoid pulling in onnxruntime
+    at test time — we're testing the service envelope, not the OCR
+    engine itself."""
+    from pipelines.counterfeit.typography import detector as ty_detector
+
+    key = "test/canonical_typography_happy.png"
+    _put_canonical(s3_bucket, key, synth_card())
+
+    # Pretend RapidOCR is installed and reads the title cleanly.
+    monkeypatch.setattr(
+        ty_detector,
+        "_try_load_ocr",
+        lambda: (lambda img: ["Lightning Bolt"]),
+    )
+
+    r = counterfeit.analyze_typography_service(
+        key, identified_card_name="Lightning Bolt"
+    )
+    assert r.abstain_reason is None
+    assert r.confidence > 0.5
+    assert r.extracted_text == "Lightning Bolt"
+    assert r.expected_text == "Lightning Bolt"
+    assert r.levenshtein_distance == 0
+    assert r.score >= 0.99
+    # Verdict maps to AUTHENTIC at the default thresholds.
+    assert (
+        counterfeit._verdict_from_typography(r) == AuthenticityVerdict.AUTHENTIC
+    )
+
+
+def test_verdict_from_typography_maps_to_enum() -> None:
+    """The string verdicts from ml/pipelines/counterfeit/ensemble round-
+    trip cleanly into the SQLAlchemy AuthenticityVerdict enum for
+    typography. Mirrors the matching test for embedding-anomaly."""
+    from pipelines.counterfeit.typography import TypographyResult
+
+    AV = AuthenticityVerdict
+    abstain = TypographyResult(
+        score=0.5,
+        confidence=0.0,
+        extracted_text=None,
+        expected_text=None,
+        levenshtein_distance=None,
+        abstain_reason="no_expected_text",
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_typography(abstain) == AV.UNVERIFIED
+
+    authentic = TypographyResult(
+        score=0.95,
+        confidence=0.85,
+        extracted_text="Lightning Bolt",
+        expected_text="Lightning Bolt",
+        levenshtein_distance=0,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_typography(authentic) == AV.AUTHENTIC
+
+    fake = TypographyResult(
+        score=0.05,
+        confidence=0.85,
+        extracted_text="Pikachu",
+        expected_text="Lightning Bolt",
+        levenshtein_distance=10,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_typography(fake) == AV.LIKELY_COUNTERFEIT
+
+
+# -----------------------------
 # _combine_verdicts ensemble logic (pure function — no S3 needed)
 # -----------------------------
 

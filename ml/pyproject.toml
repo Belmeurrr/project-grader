@@ -15,6 +15,12 @@ dependencies = [
   # Hydra ships its own copy under the `training` extra, but the
   # manifest builder + tests run without that extra installed.
   "pyyaml>=6.0",
+  # RapidOCR provides PP-OCR ONNX weights via onnxruntime — no Paddle
+  # dep, clean Windows wheels, low cold-start. Used by the typography
+  # counterfeit detector. The detector falls back gracefully (UNVERIFIED)
+  # when this isn't installed, but it's a hard dependency in the
+  # production install so the detector can actually run there.
+  "rapidocr-onnxruntime>=1.4",
 ]
 
 [project.optional-dependencies]

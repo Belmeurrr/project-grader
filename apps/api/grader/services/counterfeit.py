@@ -40,6 +40,10 @@ from pipelines.counterfeit.rosette import (
     RosetteMeasurement,
     measure_rosette,
 )
+from pipelines.counterfeit.typography import (
+    TypographyResult,
+    analyze_typography,
+)
 
 # Re-export thresholds + verdict logic from the ml-side ensemble module
 # so existing imports (tests, etc.) keep working without reaching into
@@ -57,6 +61,10 @@ EMBEDDING_AUTHENTIC_THRESHOLD = ensemble.EMBEDDING_AUTHENTIC_THRESHOLD
 EMBEDDING_COUNTERFEIT_THRESHOLD = ensemble.EMBEDDING_COUNTERFEIT_THRESHOLD
 EMBEDDING_MIN_CONFIDENCE = ensemble.EMBEDDING_MIN_CONFIDENCE
 EMBEDDING_MODEL_VERSION = ensemble.EMBEDDING_MODEL_VERSION
+TYPOGRAPHY_AUTHENTIC_THRESHOLD = ensemble.TYPOGRAPHY_AUTHENTIC_THRESHOLD
+TYPOGRAPHY_COUNTERFEIT_THRESHOLD = ensemble.TYPOGRAPHY_COUNTERFEIT_THRESHOLD
+TYPOGRAPHY_MIN_CONFIDENCE = ensemble.TYPOGRAPHY_MIN_CONFIDENCE
+TYPOGRAPHY_MODEL_VERSION = ensemble.TYPOGRAPHY_MODEL_VERSION
 
 
 class CounterfeitFailedError(Exception):
@@ -215,6 +223,72 @@ def analyze_color_profile(canonical_s3_key: str) -> ColorProfileMeasurement:
         ) from e
 
 
+def analyze_typography_service(
+    canonical_s3_key: str,
+    identified_card_name: str | None,
+) -> TypographyResult:
+    """Run the typography (OCR + Levenshtein vs identified name) detector.
+
+    Same envelope as the existing service wrappers but with one extra
+    abstain path: if `identified_card_name` is None (e.g. identification
+    didn't match the card to a known variant) the detector self-abstains
+    with reason='no_expected_text' rather than running the OCR — there's
+    nothing to compare against.
+
+    Never raises. The `analyze_typography` core function already encodes
+    every failure mode as an abstain measurement (confidence=0); this
+    wrapper additionally swallows storage / load errors so a bad canonical
+    can't take down the counterfeit ensemble. The verdict mapper in
+    ensemble.py turns confidence=0 into UNVERIFIED.
+
+    Args:
+        canonical_s3_key: S3 key of the dewarped 750x1050 BGR canonical.
+        identified_card_name: name of the matched card from the
+            identification stage, or None if unidentified.
+
+    Returns:
+        TypographyResult. Always populated; abstain encoded as
+        confidence=0 with `abstain_reason` set.
+    """
+    if identified_card_name is None or not str(identified_card_name).strip():
+        return TypographyResult(
+            score=0.5,
+            confidence=0.0,
+            extracted_text=None,
+            expected_text=None,
+            levenshtein_distance=None,
+            abstain_reason="no_expected_text",
+            manufacturer_profile="generic",
+            metadata={"reason": "unidentified"},
+        )
+    try:
+        image = _load_canonical_bgr(canonical_s3_key)
+    except CounterfeitFailedError as e:
+        return TypographyResult(
+            score=0.5,
+            confidence=0.0,
+            extracted_text=None,
+            expected_text=identified_card_name,
+            levenshtein_distance=None,
+            abstain_reason="invalid_image",
+            manufacturer_profile="generic",
+            metadata={"reason": "load_failed", "error": str(e)},
+        )
+    try:
+        return analyze_typography(image, identified_card_name)
+    except Exception as e:  # extremely defensive — analyze_typography is no-raise by contract
+        return TypographyResult(
+            score=0.5,
+            confidence=0.0,
+            extracted_text=None,
+            expected_text=identified_card_name,
+            levenshtein_distance=None,
+            abstain_reason="ocr_unavailable",
+            manufacturer_profile="generic",
+            metadata={"reason": "detector_failed", "error": str(e)},
+        )
+
+
 def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
     """Translate the ml-side string verdict into the SQLAlchemy enum.
 
@@ -237,6 +311,16 @@ def _verdict_from_embedding_anomaly(
     The detector self-abstains (UNVERIFIED) when no references are
     available — see `analyze_embedding_anomaly` for the abstain paths."""
     return AuthenticityVerdict(ensemble.verdict_from_embedding_anomaly(m))
+
+
+def _verdict_from_typography(m: TypographyResult) -> AuthenticityVerdict:
+    """Same shape as the others against the typography thresholds. The
+    detector self-abstains (UNVERIFIED) when RapidOCR is missing, no
+    expected name was supplied, OCR failed on the input, or the image
+    is invalid — see `analyze_typography_service` for the abstain paths."""
+    return AuthenticityVerdict(
+        ensemble.verdict_from_typography(m.score, m.confidence)
+    )
 
 
 def _reasons_from_color_profile(
@@ -311,6 +395,54 @@ def _reasons_from_embedding_anomaly(
     return reasons
 
 
+def _reasons_from_typography(
+    m: TypographyResult, verdict: AuthenticityVerdict
+) -> list[str]:
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        why = m.abstain_reason or (
+            m.metadata.get("reason") if isinstance(m.metadata, dict) else None
+        )
+        if why == "no_expected_text":
+            reasons.append(
+                "card not identified — no expected card name to OCR-compare"
+            )
+        elif why == "ocr_unavailable":
+            reasons.append(
+                "OCR engine unavailable — typography signal not collected"
+            )
+        elif why == "invalid_image":
+            reasons.append(
+                "title-region image invalid for OCR — typography signal skipped"
+            )
+        else:
+            reasons.append(
+                f"insufficient OCR confidence "
+                f"(confidence={m.confidence:.2f}, reason={why or 'unknown'})"
+            )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"OCR'd title matches identified card name "
+            f"(typography_score={m.score:.2f}, "
+            f"levenshtein={m.levenshtein_distance})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"OCR'd title diverges from identified card name "
+            f"(typography_score={m.score:.2f}, "
+            f"levenshtein={m.levenshtein_distance}, "
+            f"extracted={m.extracted_text!r})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"OCR'd title partially matches identified card name "
+            f"(typography_score={m.score:.2f}, "
+            f"levenshtein={m.levenshtein_distance})"
+        )
+    return reasons
+
+
 def _reasons_from_rosette(
     m: RosetteMeasurement, verdict: AuthenticityVerdict
 ) -> list[str]:
@@ -348,6 +480,22 @@ def _combine_verdicts(verdicts: list[AuthenticityVerdict]) -> AuthenticityVerdic
     )
 
 
+def _typography_no_signal(reason: str = "no_expected_text") -> TypographyResult:
+    """Default-shaped abstaining TypographyResult for callers that don't
+    have a real measurement to pass in (legacy callers, tests). Mapped
+    to UNVERIFIED by the verdict mapper."""
+    return TypographyResult(
+        score=0.5,
+        confidence=0.0,
+        extracted_text=None,
+        expected_text=None,
+        levenshtein_distance=None,
+        abstain_reason=reason,
+        manufacturer_profile="generic",
+        metadata={"reason": reason},
+    )
+
+
 async def persist_authenticity_result(
     submission_id: uuid.UUID,
     *,
@@ -355,6 +503,7 @@ async def persist_authenticity_result(
     color: ColorProfileMeasurement,
     embedding: EmbeddingAnomalyMeasurement,
     db: AsyncSession,
+    typography: TypographyResult | None = None,
 ) -> AuthenticityResult:
     """Insert or update the AuthenticityResult row for a submission.
 
@@ -370,14 +519,23 @@ async def persist_authenticity_result(
     confidence to zero. If every detector abstains, combined confidence
     is 0.
 
+    `typography` is optional for source compatibility with callers that
+    haven't been updated yet — when omitted, a no-signal abstain is
+    used so the row still includes a `typography` slot in
+    `detector_scores` (for forensic completeness) but it doesn't
+    influence the combined verdict.
+
     The detector_scores blob carries each detector's raw outputs
     verbatim so a future re-calibration can recompute verdicts from
     history without re-running the math."""
+    if typography is None:
+        typography = _typography_no_signal()
     rosette_verdict = _verdict_from_rosette(rosette)
     color_verdict = _verdict_from_color_profile(color)
     embedding_verdict = _verdict_from_embedding_anomaly(embedding)
+    typography_verdict = _verdict_from_typography(typography)
     verdict = _combine_verdicts(
-        [rosette_verdict, color_verdict, embedding_verdict]
+        [rosette_verdict, color_verdict, embedding_verdict, typography_verdict]
     )
 
     detector_scores = {
@@ -412,16 +570,32 @@ async def persist_authenticity_result(
                 else None
             ),
         },
+        "typography": {
+            "score": float(typography.score),
+            "confidence": float(typography.confidence),
+            "extracted_text": typography.extracted_text,
+            "expected_text": typography.expected_text,
+            "levenshtein_distance": (
+                int(typography.levenshtein_distance)
+                if typography.levenshtein_distance is not None
+                else None
+            ),
+            "manufacturer_profile": typography.manufacturer_profile,
+            "verdict": typography_verdict.value,
+            "abstain_reason": typography.abstain_reason,
+        },
     }
     reasons: list[str] = []
     reasons.extend(_reasons_from_rosette(rosette, rosette_verdict))
     reasons.extend(_reasons_from_color_profile(color, color_verdict))
     reasons.extend(_reasons_from_embedding_anomaly(embedding, embedding_verdict))
+    reasons.extend(_reasons_from_typography(typography, typography_verdict))
 
     model_versions = {
         "rosette": ROSETTE_MODEL_VERSION,
         "color": COLOR_MODEL_VERSION,
         "embedding_anomaly": EMBEDDING_MODEL_VERSION,
+        "typography": TYPOGRAPHY_MODEL_VERSION,
         "thresholds": {
             "rosette_authentic": ROSETTE_AUTHENTIC_THRESHOLD,
             "rosette_counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
@@ -432,6 +606,9 @@ async def persist_authenticity_result(
             "embedding_authentic": EMBEDDING_AUTHENTIC_THRESHOLD,
             "embedding_counterfeit": EMBEDDING_COUNTERFEIT_THRESHOLD,
             "embedding_min_confidence": EMBEDDING_MIN_CONFIDENCE,
+            "typography_authentic": TYPOGRAPHY_AUTHENTIC_THRESHOLD,
+            "typography_counterfeit": TYPOGRAPHY_COUNTERFEIT_THRESHOLD,
+            "typography_min_confidence": TYPOGRAPHY_MIN_CONFIDENCE,
         },
     }
 
@@ -448,6 +625,8 @@ async def persist_authenticity_result(
         confident.append(float(color.confidence))
     if embedding.confidence >= EMBEDDING_MIN_CONFIDENCE:
         confident.append(float(embedding.confidence))
+    if typography.confidence >= TYPOGRAPHY_MIN_CONFIDENCE:
+        confident.append(float(typography.confidence))
     combined_confidence = min(confident) if confident else 0.0
 
     existing = await db.scalar(

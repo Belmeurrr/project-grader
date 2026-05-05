@@ -70,6 +70,10 @@ CURRENT_THRESHOLDS: dict[str, tuple[float, float]] = {
         ensemble.EMBEDDING_AUTHENTIC_THRESHOLD,
         ensemble.EMBEDDING_COUNTERFEIT_THRESHOLD,
     ),
+    "typography": (
+        ensemble.TYPOGRAPHY_AUTHENTIC_THRESHOLD,
+        ensemble.TYPOGRAPHY_COUNTERFEIT_THRESHOLD,
+    ),
 }
 
 

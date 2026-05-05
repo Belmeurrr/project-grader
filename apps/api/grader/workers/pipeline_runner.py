@@ -208,11 +208,13 @@ async def run_pipeline(
         # is handled inside identify_canonical_for_submission as a soft fail.
         return await _mark_failed(submission, db, f"identification_failed: {e}")
 
-    # Stage 3.5: counterfeit-authenticity check. Three detectors:
+    # Stage 3.5: counterfeit-authenticity check. Four detectors:
     #   - rosette FFT (image-only)
     #   - color profile (image-only)
     #   - embedding anomaly (depends on identification result + reference
     #     embeddings store; gracefully abstains when either is missing)
+    #   - typography (depends on identification's matched card name +
+    #     RapidOCR; gracefully abstains when either is missing)
     # The combined verdict is the conservative ensemble in
     # `_combine_verdicts`. Soft-fail: a detector blow-up should not block
     # grading; the verdict (including UNVERIFIED on failure) is recorded
@@ -229,11 +231,16 @@ async def run_pipeline(
             variant_id=chosen.entry.variant_id if chosen is not None else None,
             references_store_path=get_settings().references_embeddings_path,
         )
+        typography_measurement = counterfeit.analyze_typography_service(
+            front_canonical_key,
+            chosen.entry.name if chosen is not None else None,
+        )
         authenticity = await counterfeit.persist_authenticity_result(
             submission_id=submission.id,
             rosette=rosette_measurement,
             color=color_measurement,
             embedding=embedding_measurement,
+            typography=typography_measurement,
             db=db,
         )
         db.add(
@@ -254,6 +261,13 @@ async def run_pipeline(
                     "embedding_confidence": float(embedding_measurement.confidence),
                     "embedding_n_references": int(
                         embedding_measurement.n_references
+                    ),
+                    "typography_score": float(typography_measurement.score),
+                    "typography_confidence": float(typography_measurement.confidence),
+                    "typography_levenshtein": (
+                        int(typography_measurement.levenshtein_distance)
+                        if typography_measurement.levenshtein_distance is not None
+                        else None
                     ),
                     "combined_confidence": float(authenticity.confidence),
                 },

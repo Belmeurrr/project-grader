@@ -464,14 +464,17 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert "rosette" in authenticity.detector_scores
     assert "color" in authenticity.detector_scores
     assert "embedding_anomaly" in authenticity.detector_scores
+    assert "typography" in authenticity.detector_scores
     assert "rosette" in authenticity.model_versions
     assert "color" in authenticity.model_versions
     assert "embedding_anomaly" in authenticity.model_versions
+    assert "typography" in authenticity.model_versions
     # Per-detector verdicts are stored in the detector_scores blob so a
     # later reviewer can see which detector pushed the combined verdict.
     assert "verdict" in authenticity.detector_scores["rosette"]
     assert "verdict" in authenticity.detector_scores["color"]
     assert "verdict" in authenticity.detector_scores["embedding_anomaly"]
+    assert "verdict" in authenticity.detector_scores["typography"]
     # Empty catalog → embedding-anomaly cannot identify the variant →
     # UNVERIFIED with abstain_reason="unidentified". Documents the
     # graceful-degradation path.
@@ -482,6 +485,16 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert (
         authenticity.detector_scores["embedding_anomaly"]["abstain_reason"]
         == "unidentified"
+    )
+    # Empty catalog → typography also abstains: no identified card name
+    # to OCR-compare against. Same graceful-degradation contract.
+    assert (
+        authenticity.detector_scores["typography"]["verdict"]
+        == AuthenticityVerdict.UNVERIFIED.value
+    )
+    assert (
+        authenticity.detector_scores["typography"]["abstain_reason"]
+        == "no_expected_text"
     )
     assert 0.0 <= authenticity.confidence <= 1.0
 
@@ -526,6 +539,8 @@ async def test_pipeline_writes_counterfeit_audit_log_entries(
         assert "embedding_score" in payload
         assert "embedding_confidence" in payload
         assert "embedding_n_references" in payload
+        assert "typography_score" in payload
+        assert "typography_confidence" in payload
         assert "combined_confidence" in payload
 
 
