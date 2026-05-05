@@ -6,9 +6,9 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ---
 
-## Status snapshot (2026-05-04)
+## Status snapshot (2026-05-04, late session)
 
-Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly). Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). All four ML-head trainer skeletons (corners, surface, identification/DinoV2, detection/YOLO) committed. Public cert page (`/cert/[id]`) and owner-side capture wizard (`/grade/[id]`) live — complete in→out surface in apps/web. Daily data flywheel runs as a 3-step launchd chain (ingest → re-embed references → accumulate exemplars). Counterfeit-threshold recalibration tool ships; awaiting a labeled counterfeit slice to flip from authentic-only to two-sided mode. The system is ~30% to production MVP; ML heads stay data-blocked on PSA corpus growth + variant linkage.
+Counterfeit ensemble is now **4/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly + typography). Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). Daily data flywheel is a **4-step** launchd chain (ingest → re-embed references → accumulate exemplars → catalog DB-side sync). All four ML-head trainer skeletons committed; identification trainer just got supervised metric learning unblocked (no new data needed). Public cert page now renders Phase-1 partial-grade certs without crashing (was a P0). Submit endpoint surfaces broker outages instead of stranding. Web frontend wired to real Clerk JWTs (with dev-mode fallback for tests). Capture wizard now offers optional flash + tilt shots so future detectors get archived data immediately. apps/api → ml/ imports go through a proper editable install (no more `parents[4]` footgun). Counterfeit-threshold recalibration tool covers all 4 detectors. The system is ~35% to production MVP; ML heads stay data-blocked on PSA corpus growth + counterfeit-slice sourcing.
 
 ### What's shipped (production-ready)
 
@@ -35,11 +35,11 @@ Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + 
 
 | Component | State | Notes |
 |---|---|---|
-| Counterfeit ensemble | ⚠️ MVP (3/7) | Rosette + color + embedding wired |
+| Counterfeit ensemble | ⚠️ MVP (4/7) | Rosette + color + embedding + typography wired |
 | Web UI | ⚠️ MVP | No design polish; no Clerk integration |
 | Corners trainer | ⚠️ Skeleton | Refuses to train < 200 samples |
 | Surface trainer | ⚠️ Skeleton | Default mask loader returns background |
-| Identification trainer | ⚠️ Skeleton | Lacks variant linkage for supervised triplet loss |
+| Identification trainer | ⚠️ Skeleton | Supervised metric learning unblocked via name+set sampler; awaits real training run |
 | Detection trainer | ⚠️ Skeleton | Manifest builder ready; not trained |
 | Edges grading | ⚠️ MVP | Only synthetic-calibrated confidence |
 
@@ -48,16 +48,15 @@ Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + 
 | Feature | Gap | Impact |
 |---|---|---|
 | Corners + surface grading models | Real training data | Pipeline returns NULL grades |
-| Typography detector (#5) | OCR dependency | Out of 7-detector ensemble |
 | Substrate / paper detector (#6) | Flash-shot labeled dataset | Out of 7-detector ensemble |
-| Holographic parallax (#3) | Tilt shot in capture flow | Out of 7-detector ensemble |
+| Holographic parallax (#3) | Tilt shot consumption (shot is captured; detector pending) | Out of 7-detector ensemble |
 | Stripe payments | Integration not wired | Blocks paid-tier feature |
 | TCGplayer pricing comps | Integration not wired | No EV calculations |
-| Clerk JWT swap (web) | Boilerplate | Dev mode only |
+| Clerk JWT swap (web) | ✅ wired (commit c37cf03); flip API `dev_auth_enabled=false` in prod env | (no longer dev-only) |
 | Terraform prod infra | AWS account setup | Only dev docker-compose exists |
 | Mobile app | Phase 2 | Out of MVP scope |
 | Real-data threshold calibration | ~300 labeled cards | Tool ready; corpus needed |
-| Catalog DB-side ingest | No JSONL → SQL job | `card_variants` empty in real envs |
+| Catalog DB-side ingest | ✅ shipped (sync_catalog_db.py, daily_cycle step 4); awaits first prod run | (no longer empty) |
 | MLflow model registry | No deployment plumbing | Weights local-only |
 | GDPR data export / RTBF | Not implemented | Needed for paid tier |
 
@@ -72,27 +71,20 @@ Counterfeit ensemble is **3/7 wired** end-to-end (FFT rosette + color profile + 
   - Expected: `dataset.min_samples=200` gate passes; one mini-batch flows through the EfficientNet-V2-S backbone; checkpoint written to `outputs/corners/best.pt`
   - First useful val signal needs ~1k samples (~3-4 weeks at free-tier rate, OR email `webcert@collectors.com` for paid tier).
 
-- [ ] **Recalibrate counterfeit thresholds** — three detectors now, all on synthetic-fixture defaults
-  - All thresholds in `ml/pipelines/counterfeit/ensemble.py` are calibrated against synthetic generators (the `synth_*` fixtures).
-  - Embedding-anomaly added 2026-04-29 with placeholder thresholds (0.65 / 0.35 / 0.4) mirroring the rosette + color shape — needs real-data anchors before they're trustworthy.
-  - **Tool now ships** (`evaluation.counterfeit_recalibration`, 97e3f71): given a labeled corpus, recommends per-detector AUTHENTIC + COUNTERFEIT thresholds via Youden's-J + an FPR-budget cap, emits a drop-in patch block for `ensemble.py`. Runs in `authentic_only` mode against `~/psa_data/scraped.jsonl` alone (the steady state once the daily accumulator has been running) — picks the AUTHENTIC threshold, leaves COUNTERFEIT alone until fakes appear. Switches to `two_sided` once a `--csv` of counterfeits is supplied.
-  - Remaining work is operational: source the counterfeit slice (manual curation or a small purchase set), run the tool, paste the patch, re-run the benchmark, lock + version in `model_versions` metadata. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) stays the regression gate.
+- [ ] **Recalibrate counterfeit thresholds** — four detectors now (rosette + color + embedding-anomaly + typography), all on synthetic-fixture / placeholder defaults
+  - Tool ships (`evaluation.counterfeit_recalibration`, 97e3f71); now covers typography too (4194511).
+  - Authentic-only mode usable today against `~/psa_data/scraped.jsonl`; two-sided mode unlocks once a `--csv` of counterfeits is sourced.
+  - Remaining work is operational: source the counterfeit slice (manual curation or a small purchase set), run the tool, paste the patch, lock + version in `model_versions`. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) is the regression gate.
 
-- [ ] **Fix broker-failure path on submit** — submissions silently strand if Celery is down
-  - `apps/api/grader/routers/submissions.py:237-251` flips the row to `PROCESSING` then calls `process_submission.delay(...)`. On broker exception it swallows, sets `task_id=None`, returns 202.
-  - The promised reconciler ("the worker will pick it up via the periodic reconciliation task") doesn't exist — no scheduled beat, no orphan scan. Submissions sit in `PROCESSING` forever; the wizard's status poll spins indefinitely.
-  - Pick one: (a) revert status to `CAPTURING` on `Exception` so the user can retry, (b) build the orphan-scan reconciler beat (60s, scan PROCESSING > N min with no audit-log progress).
-  - Option (a) is small + immediate; (b) is the proper fix.
+- [ ] **Identification trainer — first real training run**
+  - Sampler now produces same-name+set / different-cert positives (commit ece3c94) — supervised metric learning is unblocked.
+  - Needs sufficient PSA-identified samples per (name, set) key; current corpus may have many singletons that get dropped. Run a smoke train (`train.smoke_only=true`) to confirm wiring, then real training as the corpus matures.
 
-- [ ] **Catalog DB-side ingest job** — JSONL → `card_variants` upserts
-  - On-disk reference library at `~/manufacturer_refs/<manufacturer>/<variant_id>/` is populated by Scryfall + PokemonTCG ingests (~25k MTG / ~16k Pokemon printings reachable). The SQL `card_variants` table (`db/models.py:111`) — what the pgvector identification path queries at submission time — is **only populated by tests**.
-  - In real environments the identification lookup queries an empty table. The manufacturer reference flywheel and the production identification path run on different data stores.
-  - Fix: a daily upsert job that walks the references JSONL + `reference_embeddings.npz` and writes `CardVariant` rows with `canonical_image_embedding` + `canonical_phash` set. Belongs alongside the existing `daily_cycle.sh` chain.
+- [ ] **Surface trainer — labeled defect masks**
+  - The trainer is real; the only stub is `all_background_mask_loader` returning `None`. ~100 manually-painted defect masks (LabelMe / CVAT) on the highest-defect-grade certs would unblock real training. Drop-in `mask_loader` reads `<image>.mask.png` next to `front_image_path`.
 
-- [ ] **Add `front_full_flash` + `tilt_30` to the capture wizard**
-  - `apps/web/lib/submission.ts:28-36` already declares both as valid `ShotKind`s, but `apps/web/app/grade/[id]/page.tsx:60-97` only walks front + back + 4 corners.
-  - Surface defect detector wants flash shots; holographic-parallax detector wants tilt — both are blocked at the **capture step** before any ML work.
-  - Adding two optional shots to the wizard unblocks two future detectors with no ML work. Pure UI.
+- [ ] **Detection trainer — first real training run**
+  - `build_detection_manifest.py` already produces synthesized cards-in-scene with perfect bboxes. The dataset YAML's `path:` is `PLACEHOLDER_REGENERATE_VIA_BUILD_SCRIPT`. Smallest unblock: regenerate via the build script then `python -m training.trainers.detection`.
 
 ---
 
@@ -203,7 +195,17 @@ Flash-shot dataset + substrate detector (4-6 weeks, hardware-dependent)
 
 ## Recently shipped
 
-### 2026-05-04
+### 2026-05-04 (late session — 8-commit batch via parallel agents)
+- **Typography counterfeit detector** (`feat: typography counterfeit detector — OCR title vs identified card name`, 4194511). Detector #5 of 7. New module `ml/pipelines/counterfeit/typography/`. RapidOCR (PP-OCR weights via ONNX Runtime, no Paddle dep) on the top-10% title ROI of the canonical 750×1050 dewarped front. Case-insensitive normalized Levenshtein vs. the identified card name from the identification stage. Logistic squash midpoint 0.35, slope 12: exact match → 0.985, 1-char typo → ~0.96, totally wrong → ~0.02. Graceful UNVERIFIED on no-identified-name / invalid-image / OCR-import-missing. Wired through ensemble.py (`TYPOGRAPHY_AUTHENTIC_THRESHOLD=0.65`, `_COUNTERFEIT=0.35`, `_MIN_CONFIDENCE=0.4`), recalibration tool (`CURRENT_THRESHOLDS` + `_PATCH_CONSTANT_NAMES`), pipeline_runner stage 3.5, and persisted to `detector_scores["typography"]` on AuthenticityResult. 18 detector tests + service + pipeline tests; 112 ml tests passing total.
+- **Web frontend → real Clerk JWTs** (`feat: wire @clerk/nextjs SDK into web frontend with dev-mode fallback`, c37cf03). `@clerk/nextjs@7.3.0` mounted via `<ClerkProvider>` in `app/layout.tsx`. Middleware at `apps/web/middleware.ts` gates `/grade/:path*` only — `/cert/:path*` stays public. New `useAuthedFetch()` hook in `lib/submission.ts` calls `useAuth().getToken()` and emits `Authorization: Bearer <jwt>`; falls back to `Authorization: Dev <NEXT_PUBLIC_DEV_CLERK_ID>` when `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is unset (so tests/local dev keep working without Clerk keys). API-side `dev_auth_enabled` flag intentionally not flipped — toggle in production env. `.env.example` annotated.
+- **Capture wizard — flash + tilt shots** (`feat: capture wizard — optional front_full_flash + tilt_30 shots`, d66834c). Two `required: false` rows added to `WIZARD_SHOTS` after the corners. Backend (ShotKind enum, quality thresholds in `THRESHOLDS_BY_SHOT`) was already ready; archives the data for the future substrate (#6) + holographic (#3) detectors that consume them. UI-only.
+- **apps/api → uv editable dep on grader-ml** (`chore: apps/api → uv editable dep on grader-ml, drop sys.path bootstrap`, 287f04c). Replaced 15 `_ML_ROOT = parents[4]/"ml"` blocks (8 service/worker + 7 test files) with a real editable install via `[tool.uv.sources] grader-ml = { path = "../../ml", editable = true }` in `apps/api/pyproject.toml`. Import paths unchanged (ml's hatch wheel exposes `pipelines`, `data`, etc. at top level). 113/24 unit-pure tests green; the 46 failing tests are pre-existing pgvector/asyncpg/no-postgres infra issues, not caused by this refactor.
+- **Submit endpoint surfaces broker outages** (`fix: submit endpoint returns 503 when broker unreachable`, b123a6c). On `process_submission.delay(...)` exception, revert `sub.status = SubmissionStatus.CAPTURING` and raise HTTPException(503, `{reason: broker_unavailable, retry_after: 30}`). The early-return guard at line 220 already protects against double-enqueue. Reconciler beat intentionally NOT built — that solves a different problem (worker died mid-job). Test mocks `process_submission.delay` raising and asserts the full revert + retry path.
+- **Cert-page 500 fix — Phase-1 partial grades render** (`fix: relax GradeOut subgrades to nullable — unblock Phase-1 cert page 500`, bf70ca9). `GradeOut.{centering, corners, edges, final}` were non-nullable in the public Pydantic schema, but `compute_psa_final` returns None whenever corners or surface is missing — which is *every* Phase-1 cert with skeleton trainers. `model_validate(g)` was 500'ing on every cert request. Relaxed to `float | None`, mirrored in `apps/web/lib/cert.ts`, added an amber "Preliminary subgrades — final grade unavailable until corners + surface analysis ships" banner in `apps/web/app/cert/[id]/page.tsx` when `primary.final === null`. Regression test inserted.
+- **Catalog DB-side ingest** (`feat: sync_catalog_db script — flywheel JSONL + npz → card_sets / card_variants`, d609c63). New `ml/scripts/sync_catalog_db.py`: pass 1 upserts unique `(game, set_code)` into `card_sets`; pass 2 streams JSONL, looks up embedding from `reference_embeddings.npz`, computes `canonical_phash` from the front image (not previously precomputed), upserts into `card_variants` keyed `(game, set_id, card_number)`. Async SQLAlchemy + `INSERT ... ON CONFLICT DO UPDATE` for idempotency. Slot 4 of `daily_cycle.sh` (skips with rc=0 when `DATABASE_URL` is unset so dev boxes don't fail the cycle). 10 unit tests on the prep layer; SQL round-trip skipped because pgvector + asyncpg aren't in ml/.venv (covered by API-side test suite against real Postgres).
+- **Identification trainer — supervised metric learning unblocked** (`feat: supervised metric learning unblocked — name+set positive sampler`, ece3c94). `_sample_positive_index` previously returned `anchor_index`, so triplets only taught augmentation invariance. Now: every sample carries a normalized `(card_name, set_name)` key (lowercase + strip + collapse-whitespace; deliberately conservative — no punctuation stripping that could merge "Mewtwo" with "Mewtwo & Mew"). `key_index` lookup; singletons (no different-cert positive) are dropped. Triplet loss now sees genuine printing-variant positives. **No new training data needed** — was just a sampler swap. 100 ml tests passing.
+
+### 2026-05-04 (mid-session)
 - **Counterfeit-detector threshold recalibration tool** — `ml/evaluation/counterfeit_recalibration/` (97e3f71). Sibling to `counterfeit_benchmark`: ingests a labeled real-image corpus (`--csv` and/or `--psa-authentics scraped.jsonl`), runs it through the same ensemble runner production sees, and recommends per-detector thresholds. Two modes auto-picked from corpus contents — `two_sided` (authentics + counterfeits) uses Youden's-J on midpoint candidates + an FPR-budget cap (default ≤ 0.5%) on the LIKELY_COUNTERFEIT side; `authentic_only` (PSA-only steady state) recalibrates just the AUTHENTIC threshold and notes that COUNTERFEIT side needs fakes. Outputs a drop-in patch block for `ensemble.py` (TWO_SIDED detectors only — partial recommendations are surfaced in the report but kept out of the patch to avoid half-applying). `--json` / `--markdown` for CI / PR comments. 21 tests covering all three modes, both loaders, and end-to-end against the synthetic benchmark corpus.
 - **Daily data-flywheel wrapper** — `ml/scripts/daily_cycle.sh` (faea7d6). Replaces the previous launchd inline command with a 3-step bash chain: `psa_daily_ingest` → `embed_references` → `accumulate_psa_exemplars`. Each step runs independently (the wrapper aggregates exit codes — first non-zero rc is returned, but later steps still run on earlier failure since they have value on their own). Per-step `rc=N` lines hit `launchd.stdout.log` so a failed step is triageable. Configurable knobs: `PROJECT_ROOT`, `PYTHON`, `PSA_INGEST_DATA_DIR`, `MANUFACTURER_REFS_DATA_DIR`. Sources `$PROJECT_ROOT/.env` so secrets propagate. Smoke: `PROJECT_ROOT="$PWD" ml/scripts/daily_cycle.sh`. Plist hands off to it; previous installations keep the same `Label` so a `launchctl unload && load` cycle picks up the new behavior with no rename.
 - **Windows operation docs** — `ml/scripts/README.md` (b4d7a06). The wrapper is portable bash and runs unchanged under Git Bash; only the scheduler differs. Adds Task Scheduler setup via a `daily_cycle.cmd` wrapper (schtasks `/TR` is too brittle for inlining), an ops table (run/pause/resume/delete), and the two real Windows caveats (logged-in only, sleep-misses-runs). Brief WSL2+cron alternative.
