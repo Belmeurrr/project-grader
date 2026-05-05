@@ -36,6 +36,10 @@ from pipelines.counterfeit.embedding_anomaly import (
     EmbeddingAnomalyMeasurement,
     measure_embedding_anomaly,
 )
+from pipelines.counterfeit.holographic import (
+    HolographicResult,
+    analyze_holographic_parallax,
+)
 from pipelines.counterfeit.rosette import (
     RosetteMeasurement,
     measure_rosette,
@@ -65,6 +69,10 @@ TYPOGRAPHY_AUTHENTIC_THRESHOLD = ensemble.TYPOGRAPHY_AUTHENTIC_THRESHOLD
 TYPOGRAPHY_COUNTERFEIT_THRESHOLD = ensemble.TYPOGRAPHY_COUNTERFEIT_THRESHOLD
 TYPOGRAPHY_MIN_CONFIDENCE = ensemble.TYPOGRAPHY_MIN_CONFIDENCE
 TYPOGRAPHY_MODEL_VERSION = ensemble.TYPOGRAPHY_MODEL_VERSION
+HOLOGRAPHIC_AUTHENTIC_THRESHOLD = ensemble.HOLOGRAPHIC_AUTHENTIC_THRESHOLD
+HOLOGRAPHIC_COUNTERFEIT_THRESHOLD = ensemble.HOLOGRAPHIC_COUNTERFEIT_THRESHOLD
+HOLOGRAPHIC_MIN_CONFIDENCE = ensemble.HOLOGRAPHIC_MIN_CONFIDENCE
+HOLOGRAPHIC_MODEL_VERSION = ensemble.HOLOGRAPHIC_MODEL_VERSION
 
 
 class CounterfeitFailedError(Exception):
@@ -289,6 +297,96 @@ def analyze_typography_service(
         )
 
 
+def analyze_holographic_service(
+    canonical_front_s3_key: str,
+    canonical_tilt_s3_key: str | None,
+) -> HolographicResult:
+    """Run the holographic-parallax (front + tilt optical-flow) detector.
+
+    Same envelope as the typography service wrapper: never raises.
+    Every failure mode resolves to a confidence-0 abstain so the
+    counterfeit ensemble can degrade gracefully rather than blow up
+    the whole stage.
+
+    Abstain paths:
+      - `canonical_tilt_s3_key is None`: tilt_30 wasn't captured. The
+        wizard step is optional, so this is the common case for users
+        who skipped the tilt shot — UNVERIFIED with
+        abstain_reason='tilt_not_captured' is correct.
+      - Front canonical fails to load: UNVERIFIED with
+        abstain_reason='invalid_image'.
+      - Tilt canonical fails to load: UNVERIFIED with
+        abstain_reason='invalid_image' (we don't try to fall back to
+        front-only — the parallax signal requires both shots).
+      - The detector itself abstains (no holo region, shape mismatch,
+        flow failure) — those reasons are propagated through.
+
+    Args:
+        canonical_front_s3_key: S3 key of the dewarped 750x1050 front
+            canonical (BGR PNG).
+        canonical_tilt_s3_key: S3 key of the dewarped 750x1050 tilt_30
+            canonical (BGR PNG), or None if not captured.
+
+    Returns:
+        HolographicResult. Always populated; abstain encoded as
+        confidence=0 with `abstain_reason` set.
+    """
+    if canonical_tilt_s3_key is None:
+        return HolographicResult(
+            score=0.5,
+            confidence=0.0,
+            flow_ratio=None,
+            holo_mask_fraction=None,
+            abstain_reason="tilt_not_captured",
+            manufacturer_profile="generic",
+            metadata={"reason": "tilt_not_captured"},
+        )
+    try:
+        front = _load_canonical_bgr(canonical_front_s3_key)
+    except CounterfeitFailedError as e:
+        return HolographicResult(
+            score=0.5,
+            confidence=0.0,
+            flow_ratio=None,
+            holo_mask_fraction=None,
+            abstain_reason="invalid_image",
+            manufacturer_profile="generic",
+            metadata={
+                "reason": "load_failed",
+                "which": "front",
+                "error": str(e),
+            },
+        )
+    try:
+        tilt = _load_canonical_bgr(canonical_tilt_s3_key)
+    except CounterfeitFailedError as e:
+        return HolographicResult(
+            score=0.5,
+            confidence=0.0,
+            flow_ratio=None,
+            holo_mask_fraction=None,
+            abstain_reason="invalid_image",
+            manufacturer_profile="generic",
+            metadata={
+                "reason": "load_failed",
+                "which": "tilt",
+                "error": str(e),
+            },
+        )
+    try:
+        return analyze_holographic_parallax(front, tilt)
+    except Exception as e:  # extremely defensive — analyze_* is no-raise by contract
+        return HolographicResult(
+            score=0.5,
+            confidence=0.0,
+            flow_ratio=None,
+            holo_mask_fraction=None,
+            abstain_reason="flow_computation_failed",
+            manufacturer_profile="generic",
+            metadata={"reason": "detector_failed", "error": str(e)},
+        )
+
+
 def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
     """Translate the ml-side string verdict into the SQLAlchemy enum.
 
@@ -320,6 +418,17 @@ def _verdict_from_typography(m: TypographyResult) -> AuthenticityVerdict:
     is invalid — see `analyze_typography_service` for the abstain paths."""
     return AuthenticityVerdict(
         ensemble.verdict_from_typography(m.score, m.confidence)
+    )
+
+
+def _verdict_from_holographic(m: HolographicResult) -> AuthenticityVerdict:
+    """Same shape as the others against the holographic-parallax thresholds.
+    The detector self-abstains (UNVERIFIED) when tilt_30 wasn't captured,
+    when the chroma+saturation heuristic finds no obvious foil region on
+    the front shot, or when Farnebäck flow computation fails — see
+    `analyze_holographic_service` for the abstain paths."""
+    return AuthenticityVerdict(
+        ensemble.verdict_from_holographic(m.score, m.confidence)
     )
 
 
@@ -443,6 +552,68 @@ def _reasons_from_typography(
     return reasons
 
 
+def _reasons_from_holographic(
+    m: HolographicResult, verdict: AuthenticityVerdict
+) -> list[str]:
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        why = m.abstain_reason or (
+            m.metadata.get("reason") if isinstance(m.metadata, dict) else None
+        )
+        if why == "tilt_not_captured":
+            reasons.append(
+                "tilt_30 shot not captured — holographic-parallax signal "
+                "skipped (optional capture step)"
+            )
+        elif why == "no_holo_region":
+            reasons.append(
+                "no obvious foil region on front canonical — "
+                "holographic-parallax signal skipped"
+            )
+        elif why == "shape_mismatch":
+            reasons.append(
+                "front and tilt canonicals had mismatched shapes — "
+                "holographic-parallax signal skipped"
+            )
+        elif why == "flow_computation_failed":
+            reasons.append(
+                "optical-flow computation failed on front+tilt pair — "
+                "holographic-parallax signal skipped"
+            )
+        elif why == "invalid_image":
+            reasons.append(
+                "front or tilt canonical invalid for flow analysis — "
+                "holographic-parallax signal skipped"
+            )
+        else:
+            reasons.append(
+                f"insufficient holographic-parallax confidence "
+                f"(confidence={m.confidence:.2f}, reason={why or 'unknown'})"
+            )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"strong differential parallax flow consistent with real holo "
+            f"(holographic_score={m.score:.2f}, "
+            f"flow_ratio={(m.flow_ratio or 0.0):.2f}, "
+            f"mask_fraction={(m.holo_mask_fraction or 0.0):.3f})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"flat foil region — no parallax shift between front and tilt "
+            f"(holographic_score={m.score:.2f}, "
+            f"flow_ratio={(m.flow_ratio or 0.0):.2f}, "
+            f"mask_fraction={(m.holo_mask_fraction or 0.0):.3f})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"borderline parallax flow — neither clearly holo nor flat "
+            f"(holographic_score={m.score:.2f}, "
+            f"flow_ratio={(m.flow_ratio or 0.0):.2f})"
+        )
+    return reasons
+
+
 def _reasons_from_rosette(
     m: RosetteMeasurement, verdict: AuthenticityVerdict
 ) -> list[str]:
@@ -480,6 +651,21 @@ def _combine_verdicts(verdicts: list[AuthenticityVerdict]) -> AuthenticityVerdic
     )
 
 
+def _holographic_no_signal(reason: str = "tilt_not_captured") -> HolographicResult:
+    """Default-shaped abstaining HolographicResult for callers that don't
+    have a real measurement to pass in (legacy callers, tests). Mapped
+    to UNVERIFIED by the verdict mapper."""
+    return HolographicResult(
+        score=0.5,
+        confidence=0.0,
+        flow_ratio=None,
+        holo_mask_fraction=None,
+        abstain_reason=reason,
+        manufacturer_profile="generic",
+        metadata={"reason": reason},
+    )
+
+
 def _typography_no_signal(reason: str = "no_expected_text") -> TypographyResult:
     """Default-shaped abstaining TypographyResult for callers that don't
     have a real measurement to pass in (legacy callers, tests). Mapped
@@ -504,6 +690,7 @@ async def persist_authenticity_result(
     embedding: EmbeddingAnomalyMeasurement,
     db: AsyncSession,
     typography: TypographyResult | None = None,
+    holographic: HolographicResult | None = None,
 ) -> AuthenticityResult:
     """Insert or update the AuthenticityResult row for a submission.
 
@@ -530,12 +717,21 @@ async def persist_authenticity_result(
     history without re-running the math."""
     if typography is None:
         typography = _typography_no_signal()
+    if holographic is None:
+        holographic = _holographic_no_signal()
     rosette_verdict = _verdict_from_rosette(rosette)
     color_verdict = _verdict_from_color_profile(color)
     embedding_verdict = _verdict_from_embedding_anomaly(embedding)
     typography_verdict = _verdict_from_typography(typography)
+    holographic_verdict = _verdict_from_holographic(holographic)
     verdict = _combine_verdicts(
-        [rosette_verdict, color_verdict, embedding_verdict, typography_verdict]
+        [
+            rosette_verdict,
+            color_verdict,
+            embedding_verdict,
+            typography_verdict,
+            holographic_verdict,
+        ]
     )
 
     detector_scores = {
@@ -584,18 +780,37 @@ async def persist_authenticity_result(
             "verdict": typography_verdict.value,
             "abstain_reason": typography.abstain_reason,
         },
+        "holographic": {
+            "score": float(holographic.score),
+            "confidence": float(holographic.confidence),
+            "flow_ratio": (
+                float(holographic.flow_ratio)
+                if holographic.flow_ratio is not None
+                else None
+            ),
+            "holo_mask_fraction": (
+                float(holographic.holo_mask_fraction)
+                if holographic.holo_mask_fraction is not None
+                else None
+            ),
+            "manufacturer_profile": holographic.manufacturer_profile,
+            "verdict": holographic_verdict.value,
+            "abstain_reason": holographic.abstain_reason,
+        },
     }
     reasons: list[str] = []
     reasons.extend(_reasons_from_rosette(rosette, rosette_verdict))
     reasons.extend(_reasons_from_color_profile(color, color_verdict))
     reasons.extend(_reasons_from_embedding_anomaly(embedding, embedding_verdict))
     reasons.extend(_reasons_from_typography(typography, typography_verdict))
+    reasons.extend(_reasons_from_holographic(holographic, holographic_verdict))
 
     model_versions = {
         "rosette": ROSETTE_MODEL_VERSION,
         "color": COLOR_MODEL_VERSION,
         "embedding_anomaly": EMBEDDING_MODEL_VERSION,
         "typography": TYPOGRAPHY_MODEL_VERSION,
+        "holographic": HOLOGRAPHIC_MODEL_VERSION,
         "thresholds": {
             "rosette_authentic": ROSETTE_AUTHENTIC_THRESHOLD,
             "rosette_counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
@@ -609,6 +824,9 @@ async def persist_authenticity_result(
             "typography_authentic": TYPOGRAPHY_AUTHENTIC_THRESHOLD,
             "typography_counterfeit": TYPOGRAPHY_COUNTERFEIT_THRESHOLD,
             "typography_min_confidence": TYPOGRAPHY_MIN_CONFIDENCE,
+            "holographic_authentic": HOLOGRAPHIC_AUTHENTIC_THRESHOLD,
+            "holographic_counterfeit": HOLOGRAPHIC_COUNTERFEIT_THRESHOLD,
+            "holographic_min_confidence": HOLOGRAPHIC_MIN_CONFIDENCE,
         },
     }
 
@@ -627,6 +845,8 @@ async def persist_authenticity_result(
         confident.append(float(embedding.confidence))
     if typography.confidence >= TYPOGRAPHY_MIN_CONFIDENCE:
         confident.append(float(typography.confidence))
+    if holographic.confidence >= HOLOGRAPHIC_MIN_CONFIDENCE:
+        confident.append(float(holographic.confidence))
     combined_confidence = min(confident) if confident else 0.0
 
     existing = await db.scalar(

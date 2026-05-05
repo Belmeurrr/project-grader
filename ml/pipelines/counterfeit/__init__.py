@@ -6,6 +6,10 @@ from pipelines.counterfeit.embedding_anomaly import (
     EmbeddingAnomalyMeasurement,
     measure_embedding_anomaly,
 )
+from pipelines.counterfeit.holographic import (
+    HolographicResult,
+    analyze_holographic_parallax,
+)
 from pipelines.counterfeit.rosette import (
     DEFAULT_FREQ_BAND,
     DEFAULT_INNER_INSET_PX,
@@ -31,6 +35,9 @@ __all__ = [
     # Typography (OCR + Levenshtein vs identified name) — #5
     "TypographyResult",
     "analyze_typography",
+    # Holographic parallax (front+tilt optical-flow ratio) — #3
+    "HolographicResult",
+    "analyze_holographic_parallax",
     # Embedding anomaly (cosine distance from authentic centroid) — #7
     "EmbeddingAnomalyMeasurement",
     "measure_embedding_anomaly",

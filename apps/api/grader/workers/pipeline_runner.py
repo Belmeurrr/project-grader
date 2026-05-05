@@ -49,8 +49,10 @@ from pipelines.identification import (
 
 # Shots that v1 (centering-only) requires before grading can run.
 # Front is required; back is optional (PSA centering can grade front-only).
+# Tilt_30 is also optional (the wizard step is opt-in) — used by the
+# holographic-parallax counterfeit detector when present.
 REQUIRED_SHOTS: tuple[ShotKind, ...] = (ShotKind.FRONT_FULL,)
-OPTIONAL_SHOTS: tuple[ShotKind, ...] = (ShotKind.BACK_FULL,)
+OPTIONAL_SHOTS: tuple[ShotKind, ...] = (ShotKind.BACK_FULL, ShotKind.TILT_30)
 
 
 @dataclass
@@ -115,14 +117,30 @@ def _run_detect_and_dewarp(
     shots_by_kind: dict[ShotKind, SubmissionShot],
 ) -> dict[ShotKind, str]:
     """Run Stage 1 + 2 on each shot that needs a canonical image. Returns a
-    map kind → canonical_s3_key. Raises DetectionFailedError on hard fails."""
+    map kind → canonical_s3_key. Raises DetectionFailedError on hard fails
+    for REQUIRED + back; tilt_30 is best-effort (a 30° tilt that fails
+    detection just means the holographic-parallax detector abstains)."""
     canonicals: dict[ShotKind, str] = {}
-    for kind in (*REQUIRED_SHOTS, *OPTIONAL_SHOTS):
+    for kind in (*REQUIRED_SHOTS, ShotKind.BACK_FULL):
         shot = shots_by_kind.get(kind)
         if shot is None:
             continue
         result = detection.detect_and_dewarp_shot(shot.s3_key, kind)
         canonicals[kind] = result.canonical_s3_key
+    # tilt_30 is by construction a steeper angle than front/back shots —
+    # relax the irregularity cap so a 30° tilt isn't rejected by the
+    # same gate that protects against bent cards on the straight-on
+    # shots. And soft-fail: a wonky tilt capture shouldn't sink a
+    # submission; the holographic detector will abstain UNVERIFIED.
+    tilt_shot = shots_by_kind.get(ShotKind.TILT_30)
+    if tilt_shot is not None:
+        try:
+            tilt_result = detection.detect_and_dewarp_shot(
+                tilt_shot.s3_key, ShotKind.TILT_30, max_irregularity=0.45
+            )
+            canonicals[ShotKind.TILT_30] = tilt_result.canonical_s3_key
+        except detection.DetectionFailedError:
+            pass
     return canonicals
 
 
@@ -208,13 +226,16 @@ async def run_pipeline(
         # is handled inside identify_canonical_for_submission as a soft fail.
         return await _mark_failed(submission, db, f"identification_failed: {e}")
 
-    # Stage 3.5: counterfeit-authenticity check. Four detectors:
+    # Stage 3.5: counterfeit-authenticity check. Five detectors:
     #   - rosette FFT (image-only)
     #   - color profile (image-only)
     #   - embedding anomaly (depends on identification result + reference
     #     embeddings store; gracefully abstains when either is missing)
     #   - typography (depends on identification's matched card name +
     #     RapidOCR; gracefully abstains when either is missing)
+    #   - holographic parallax (depends on the optional tilt_30 shot;
+    #     gracefully abstains when tilt isn't captured or no foil region
+    #     is detected on the front shot)
     # The combined verdict is the conservative ensemble in
     # `_combine_verdicts`. Soft-fail: a detector blow-up should not block
     # grading; the verdict (including UNVERIFIED on failure) is recorded
@@ -235,12 +256,22 @@ async def run_pipeline(
             front_canonical_key,
             chosen.entry.name if chosen is not None else None,
         )
+        # tilt_30 is optional — pass None to the service when no canonical
+        # was produced (either the shot wasn't captured, or detection
+        # failed on it). The detector turns None into an UNVERIFIED
+        # abstain with abstain_reason='tilt_not_captured'.
+        tilt_canonical_key = canonicals.get(ShotKind.TILT_30)
+        holographic_measurement = counterfeit.analyze_holographic_service(
+            front_canonical_key,
+            tilt_canonical_key,
+        )
         authenticity = await counterfeit.persist_authenticity_result(
             submission_id=submission.id,
             rosette=rosette_measurement,
             color=color_measurement,
             embedding=embedding_measurement,
             typography=typography_measurement,
+            holographic=holographic_measurement,
             db=db,
         )
         db.add(
@@ -269,6 +300,19 @@ async def run_pipeline(
                         if typography_measurement.levenshtein_distance is not None
                         else None
                     ),
+                    "holographic_score": float(holographic_measurement.score),
+                    "holographic_confidence": float(holographic_measurement.confidence),
+                    "holographic_flow_ratio": (
+                        float(holographic_measurement.flow_ratio)
+                        if holographic_measurement.flow_ratio is not None
+                        else None
+                    ),
+                    "holographic_mask_fraction": (
+                        float(holographic_measurement.holo_mask_fraction)
+                        if holographic_measurement.holo_mask_fraction is not None
+                        else None
+                    ),
+                    "tilt_canonical_present": tilt_canonical_key is not None,
                     "combined_confidence": float(authenticity.confidence),
                 },
             )

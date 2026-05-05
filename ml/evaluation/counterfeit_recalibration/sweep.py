@@ -74,6 +74,10 @@ CURRENT_THRESHOLDS: dict[str, tuple[float, float]] = {
         ensemble.TYPOGRAPHY_AUTHENTIC_THRESHOLD,
         ensemble.TYPOGRAPHY_COUNTERFEIT_THRESHOLD,
     ),
+    "holographic": (
+        ensemble.HOLOGRAPHIC_AUTHENTIC_THRESHOLD,
+        ensemble.HOLOGRAPHIC_COUNTERFEIT_THRESHOLD,
+    ),
 }
 
 

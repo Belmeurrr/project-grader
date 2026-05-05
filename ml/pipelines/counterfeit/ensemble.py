@@ -22,6 +22,7 @@ from typing import Iterable
 
 from pipelines.counterfeit.color import ColorProfileMeasurement
 from pipelines.counterfeit.embedding_anomaly import EmbeddingAnomalyMeasurement
+from pipelines.counterfeit.holographic import HolographicResult
 from pipelines.counterfeit.rosette import RosetteMeasurement
 from pipelines.counterfeit.typography import TypographyResult
 
@@ -92,6 +93,21 @@ TYPOGRAPHY_MIN_CONFIDENCE: float = 0.4
 TYPOGRAPHY_MODEL_VERSION: str = "ocr-levenshtein-v1"
 
 
+# Holographic-parallax detector. Score is a logistic of the
+# inside-vs-outside flow ratio between front and tilt_30 captures.
+# Real holos exhibit angle-dependent specular shifts that produce a
+# strong differential flow inside the foil mask vs. the rest of the
+# card; flat fakes don't. The detector self-abstains when (a) tilt_30
+# wasn't captured, (b) the chroma+saturation heuristic finds no
+# obvious foil region on the front shot, or (c) Farnebäck flow
+# computation throws. Synthetic placeholders — recalibration tool
+# ratchets them later.
+HOLOGRAPHIC_AUTHENTIC_THRESHOLD: float = 0.65
+HOLOGRAPHIC_COUNTERFEIT_THRESHOLD: float = 0.35
+HOLOGRAPHIC_MIN_CONFIDENCE: float = 0.4
+HOLOGRAPHIC_MODEL_VERSION: str = "parallax-flow-v1"
+
+
 # --------------------------------------------------------------------------
 # Per-detector verdict mappers
 # --------------------------------------------------------------------------
@@ -145,6 +161,27 @@ def verdict_from_typography(score: float, confidence: float) -> str:
     if score >= TYPOGRAPHY_AUTHENTIC_THRESHOLD:
         return VERDICT_AUTHENTIC
     if score < TYPOGRAPHY_COUNTERFEIT_THRESHOLD:
+        return VERDICT_LIKELY_COUNTERFEIT
+    return VERDICT_SUSPICIOUS
+
+
+def verdict_from_holographic(score: float, confidence: float) -> str:
+    """Tri-state verdict for the holographic-parallax detector.
+
+    UNVERIFIED when the detector abstained (tilt missing, no holo
+    region found, flow computation failed) — encoded as confidence <
+    HOLOGRAPHIC_MIN_CONFIDENCE. Above the AUTHENTIC threshold →
+    AUTHENTIC. Below the COUNTERFEIT threshold → LIKELY_COUNTERFEIT.
+    Between → SUSPICIOUS.
+
+    Takes (score, confidence) directly rather than a HolographicResult
+    so the benchmark and the apps/api wrapper can call this with the
+    same signature shape that the recalibration tool consumes."""
+    if confidence < HOLOGRAPHIC_MIN_CONFIDENCE:
+        return VERDICT_UNVERIFIED
+    if score >= HOLOGRAPHIC_AUTHENTIC_THRESHOLD:
+        return VERDICT_AUTHENTIC
+    if score < HOLOGRAPHIC_COUNTERFEIT_THRESHOLD:
         return VERDICT_LIKELY_COUNTERFEIT
     return VERDICT_SUSPICIOUS
 
@@ -227,10 +264,15 @@ __all__ = [
     "TYPOGRAPHY_COUNTERFEIT_THRESHOLD",
     "TYPOGRAPHY_MIN_CONFIDENCE",
     "TYPOGRAPHY_MODEL_VERSION",
+    "HOLOGRAPHIC_AUTHENTIC_THRESHOLD",
+    "HOLOGRAPHIC_COUNTERFEIT_THRESHOLD",
+    "HOLOGRAPHIC_MIN_CONFIDENCE",
+    "HOLOGRAPHIC_MODEL_VERSION",
     # Logic
     "verdict_from_rosette",
     "verdict_from_color_profile",
     "verdict_from_embedding_anomaly",
     "verdict_from_typography",
+    "verdict_from_holographic",
     "combine_verdicts",
 ]

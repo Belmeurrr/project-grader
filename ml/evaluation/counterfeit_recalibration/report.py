@@ -54,6 +54,10 @@ _PATCH_CONSTANT_NAMES: dict[str, tuple[str, str]] = {
         "TYPOGRAPHY_AUTHENTIC_THRESHOLD",
         "TYPOGRAPHY_COUNTERFEIT_THRESHOLD",
     ),
+    "holographic": (
+        "HOLOGRAPHIC_AUTHENTIC_THRESHOLD",
+        "HOLOGRAPHIC_COUNTERFEIT_THRESHOLD",
+    ),
 }
 
 
@@ -75,7 +79,7 @@ def _fmt_delta(current: float, recommended: float | None) -> str:
 
 def _detector_order(by_det: dict[str, ThresholdRecommendation]) -> list[str]:
     """Render order matching the benchmark/console convention."""
-    fixed = ["rosette", "color", "embedding_anomaly", "typography"]
+    fixed = ["rosette", "color", "embedding_anomaly", "typography", "holographic"]
     seen = set(by_det.keys())
     return [d for d in fixed if d in seen] + sorted(seen - set(fixed))
 

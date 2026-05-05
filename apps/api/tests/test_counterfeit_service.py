@@ -257,6 +257,169 @@ def test_analyze_typography_service_happy_path_returns_populated_result(
     )
 
 
+# -----------------------------
+# analyze_holographic_service — abstain paths and image-load envelope
+# -----------------------------
+
+
+def _put_synth_holo_canonical(
+    bucket: str,
+    key: str,
+    *,
+    foil_block: tuple[int, int, int] = (50, 200, 240),
+    shift_dx: int = 0,
+) -> None:
+    """Build a synthetic 1050x750 BGR canonical with a foil-like
+    saturated rectangle in the middle. shift_dx > 0 displaces the
+    block horizontally — used to simulate the parallax difference
+    between a front and tilt shot."""
+    img = np.full((1050, 750, 3), 200, dtype=np.uint8)
+    y0, y1 = 200, 600
+    x0, x1 = 150 + shift_dx, 600 + shift_dx
+    x0 = max(0, x0)
+    x1 = min(750, x1)
+    img[y0:y1, x0:x1] = foil_block
+    # Add a small gradient so the optical-flow estimator can lock on.
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    mod = ((xx + yy) % 16).astype(np.uint8) * 8
+    img[y0:y1, x0:x1, 0] = np.clip(
+        img[y0:y1, x0:x1, 0].astype(np.int16) + mod - 64, 0, 255
+    ).astype(np.uint8)
+    img[y0:y1, x0:x1, 2] = np.clip(
+        img[y0:y1, x0:x1, 2].astype(np.int16) - mod + 64, 0, 255
+    ).astype(np.uint8)
+    _put_canonical(bucket, key, img)
+
+
+def test_analyze_holographic_service_abstains_when_tilt_missing(
+    s3_bucket: str,
+) -> None:
+    """No tilt canonical key (tilt_30 not captured) → abstain
+    (UNVERIFIED) with reason='tilt_not_captured'. Documents the
+    optional-shot graceful-degradation path."""
+    front_key = "test/canonical_holo_front.png"
+    _put_synth_holo_canonical(s3_bucket, front_key, shift_dx=0)
+    r = counterfeit.analyze_holographic_service(front_key, None)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "tilt_not_captured"
+    assert (
+        counterfeit._verdict_from_holographic(r) == AuthenticityVerdict.UNVERIFIED
+    )
+
+
+def test_analyze_holographic_service_does_not_raise_on_corrupt_front(
+    s3_bucket: str,
+) -> None:
+    """Corrupt front canonical → swallow + abstain. The holographic
+    service never raises, even on unreadable inputs."""
+    front_key = "test/bad-holo-front.png"
+    tilt_key = "test/canonical_holo_tilt.png"
+    _put_synth_holo_canonical(s3_bucket, tilt_key, shift_dx=6)
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=s3_bucket,
+        Key=front_key,
+        Body=b"not a png",
+        ContentType="image/png",
+    )
+    r = counterfeit.analyze_holographic_service(front_key, tilt_key)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "invalid_image"
+
+
+def test_analyze_holographic_service_does_not_raise_on_corrupt_tilt(
+    s3_bucket: str,
+) -> None:
+    front_key = "test/canonical_holo_front2.png"
+    tilt_key = "test/bad-holo-tilt.png"
+    _put_synth_holo_canonical(s3_bucket, front_key, shift_dx=0)
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=s3_bucket,
+        Key=tilt_key,
+        Body=b"not a png",
+        ContentType="image/png",
+    )
+    r = counterfeit.analyze_holographic_service(front_key, tilt_key)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "invalid_image"
+
+
+def test_analyze_holographic_service_happy_path(s3_bucket: str) -> None:
+    """Front + tilt canonicals both present, foil region shifted on the
+    tilt → flow ratio fires, score lands authentic-side, verdict
+    AUTHENTIC."""
+    front_key = "test/canonical_holo_front_happy.png"
+    tilt_key = "test/canonical_holo_tilt_happy.png"
+    _put_synth_holo_canonical(s3_bucket, front_key, shift_dx=0)
+    _put_synth_holo_canonical(s3_bucket, tilt_key, shift_dx=6)
+
+    r = counterfeit.analyze_holographic_service(front_key, tilt_key)
+    assert r.abstain_reason is None
+    assert r.confidence > 0.5
+    assert r.flow_ratio is not None
+    assert r.flow_ratio > 2.0
+    assert r.score >= 0.85
+    assert (
+        counterfeit._verdict_from_holographic(r) == AuthenticityVerdict.AUTHENTIC
+    )
+
+
+def test_analyze_holographic_service_flat_foil_scores_counterfeit(
+    s3_bucket: str,
+) -> None:
+    """Same foil region, no shift → ratio ≈ 1, score counterfeit-side."""
+    front_key = "test/canonical_holo_front_flat.png"
+    tilt_key = "test/canonical_holo_tilt_flat.png"
+    _put_synth_holo_canonical(s3_bucket, front_key, shift_dx=0)
+    _put_synth_holo_canonical(s3_bucket, tilt_key, shift_dx=0)
+
+    r = counterfeit.analyze_holographic_service(front_key, tilt_key)
+    assert r.abstain_reason is None
+    assert r.confidence > 0.5
+    assert r.score <= 0.20
+    assert (
+        counterfeit._verdict_from_holographic(r)
+        == AuthenticityVerdict.LIKELY_COUNTERFEIT
+    )
+
+
+def test_verdict_from_holographic_maps_to_enum() -> None:
+    """The string verdicts from ml/pipelines/counterfeit/ensemble round-
+    trip cleanly into the SQLAlchemy AuthenticityVerdict enum for
+    holographic. Mirrors the matching tests for typography + embedding."""
+    from pipelines.counterfeit.holographic import HolographicResult
+
+    AV = AuthenticityVerdict
+    abstain = HolographicResult(
+        score=0.5,
+        confidence=0.0,
+        flow_ratio=None,
+        holo_mask_fraction=None,
+        abstain_reason="tilt_not_captured",
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_holographic(abstain) == AV.UNVERIFIED
+
+    authentic = HolographicResult(
+        score=0.92,
+        confidence=0.85,
+        flow_ratio=3.5,
+        holo_mask_fraction=0.12,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_holographic(authentic) == AV.AUTHENTIC
+
+    fake = HolographicResult(
+        score=0.05,
+        confidence=0.85,
+        flow_ratio=1.0,
+        holo_mask_fraction=0.12,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_holographic(fake) == AV.LIKELY_COUNTERFEIT
+
+
 def test_verdict_from_typography_maps_to_enum() -> None:
     """The string verdicts from ml/pipelines/counterfeit/ensemble round-
     trip cleanly into the SQLAlchemy AuthenticityVerdict enum for

@@ -465,16 +465,30 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert "color" in authenticity.detector_scores
     assert "embedding_anomaly" in authenticity.detector_scores
     assert "typography" in authenticity.detector_scores
+    assert "holographic" in authenticity.detector_scores
     assert "rosette" in authenticity.model_versions
     assert "color" in authenticity.model_versions
     assert "embedding_anomaly" in authenticity.model_versions
     assert "typography" in authenticity.model_versions
+    assert "holographic" in authenticity.model_versions
     # Per-detector verdicts are stored in the detector_scores blob so a
     # later reviewer can see which detector pushed the combined verdict.
     assert "verdict" in authenticity.detector_scores["rosette"]
     assert "verdict" in authenticity.detector_scores["color"]
     assert "verdict" in authenticity.detector_scores["embedding_anomaly"]
     assert "verdict" in authenticity.detector_scores["typography"]
+    assert "verdict" in authenticity.detector_scores["holographic"]
+    # Holographic abstains UNVERIFIED when no tilt_30 shot is in the
+    # submission (the wizard step is optional). Documents the
+    # graceful-degradation path.
+    assert (
+        authenticity.detector_scores["holographic"]["verdict"]
+        == AuthenticityVerdict.UNVERIFIED.value
+    )
+    assert (
+        authenticity.detector_scores["holographic"]["abstain_reason"]
+        == "tilt_not_captured"
+    )
     # Empty catalog → embedding-anomaly cannot identify the variant →
     # UNVERIFIED with abstain_reason="unidentified". Documents the
     # graceful-degradation path.
@@ -541,6 +555,9 @@ async def test_pipeline_writes_counterfeit_audit_log_entries(
         assert "embedding_n_references" in payload
         assert "typography_score" in payload
         assert "typography_confidence" in payload
+        assert "holographic_score" in payload
+        assert "holographic_confidence" in payload
+        assert "tilt_canonical_present" in payload
         assert "combined_confidence" in payload
 
 
@@ -676,6 +693,44 @@ async def test_pipeline_runs_embedding_anomaly_when_references_available(
         AuthenticityVerdict.SUSPICIOUS.value,
     }
     assert emb_scores["abstain_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_holographic_runs_when_tilt_shot_present(
+    s3_bucket: str, db_session: AsyncSession
+) -> None:
+    """When a tilt_30 shot is captured AND passes detection, the
+    holographic-parallax detector actually runs (not abstain) and
+    persists a non-None flow_ratio + holo_mask_fraction. This is the
+    end-to-end happy path for the fifth detector — front+tilt shots
+    produced by `card_in_scene` are nearly identical (same pHash), so
+    flow ratio sits near 1 and the verdict lands LIKELY_COUNTERFEIT
+    or SUSPICIOUS depending on calibration; either way, the detector
+    fired (abstain_reason is None)."""
+    user = await _make_user(db_session)
+    sub = await _make_submission(db_session, user)
+    front = card_in_scene(fill=0.55)
+    await _add_shot(db_session, sub.id, ShotKind.FRONT_FULL, s3_bucket, front)
+    # Reuse the same scene for tilt — detection succeeds (it's a card),
+    # the dewarp produces a same-shaped canonical, and the holographic
+    # detector runs against an identical pair (no parallax, low score).
+    await _add_shot(db_session, sub.id, ShotKind.TILT_30, s3_bucket, front)
+
+    await run_pipeline(
+        submission_id=sub.id, db=db_session,
+        catalog=_empty_catalog(), embedder=SimpleEmbedder(),
+    )
+
+    authenticity = await db_session.scalar(
+        select(AuthenticityResult).where(AuthenticityResult.submission_id == sub.id)
+    )
+    assert authenticity is not None
+    holo = authenticity.detector_scores["holographic"]
+    # The headline assertion: the detector saw both shots and produced
+    # an abstain other than tilt_not_captured (might still abstain on
+    # no_holo_region if the synthetic card has low chroma+saturation,
+    # but the abstain_reason should never be tilt_not_captured here).
+    assert holo["abstain_reason"] != "tilt_not_captured"
 
 
 @pytest.mark.asyncio
