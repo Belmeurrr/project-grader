@@ -8,7 +8,7 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Status snapshot (2026-05-04, late session)
 
-Counterfeit ensemble is now **4/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly + typography). Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). Daily data flywheel is a **4-step** launchd chain (ingest → re-embed references → accumulate exemplars → catalog DB-side sync). All four ML-head trainer skeletons committed; identification trainer just got supervised metric learning unblocked (no new data needed). Public cert page now renders Phase-1 partial-grade certs without crashing (was a P0). Submit endpoint surfaces broker outages instead of stranding. Web frontend wired to real Clerk JWTs (with dev-mode fallback for tests). Capture wizard now offers optional flash + tilt shots so future detectors get archived data immediately. apps/api → ml/ imports go through a proper editable install (no more `parents[4]` footgun). Counterfeit-threshold recalibration tool covers all 4 detectors. The system is ~35% to production MVP; ML heads stay data-blocked on PSA corpus growth + counterfeit-slice sourcing.
+Counterfeit ensemble is now **5/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly + typography + holographic-parallax). Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). Daily data flywheel is a **4-step** launchd chain (ingest → re-embed references → accumulate exemplars → catalog DB-side sync). All four ML-head trainer skeletons committed; identification trainer just got supervised metric learning unblocked (no new data needed). Public cert page now renders Phase-1 partial-grade certs without crashing (was a P0). Submit endpoint surfaces broker outages instead of stranding. Web frontend wired to real Clerk JWTs (with dev-mode fallback for tests). Capture wizard now offers optional flash + tilt shots so future detectors get archived data immediately. apps/api → ml/ imports go through a proper editable install (no more `parents[4]` footgun). Counterfeit-threshold recalibration tool covers all 4 detectors. The system is ~35% to production MVP; ML heads stay data-blocked on PSA corpus growth + counterfeit-slice sourcing.
 
 ### What's shipped (production-ready)
 
@@ -35,7 +35,7 @@ Counterfeit ensemble is now **4/7 wired** end-to-end (FFT rosette + color profil
 
 | Component | State | Notes |
 |---|---|---|
-| Counterfeit ensemble | ⚠️ MVP (4/7) | Rosette + color + embedding + typography wired |
+| Counterfeit ensemble | ⚠️ MVP (5/7) | Rosette + color + embedding + typography + holographic wired |
 | Web UI | ⚠️ MVP | No design polish; no Clerk integration |
 | Corners trainer | ⚠️ Skeleton | Refuses to train < 200 samples |
 | Surface trainer | ⚠️ Skeleton | Default mask loader returns background |
@@ -49,7 +49,6 @@ Counterfeit ensemble is now **4/7 wired** end-to-end (FFT rosette + color profil
 |---|---|---|
 | Corners + surface grading models | Real training data | Pipeline returns NULL grades |
 | Substrate / paper detector (#6) | Flash-shot labeled dataset | Out of 7-detector ensemble |
-| Holographic parallax (#3) | Tilt shot consumption (shot is captured; detector pending) | Out of 7-detector ensemble |
 | Stripe payments | Integration not wired | Blocks paid-tier feature |
 | TCGplayer pricing comps | Integration not wired | No EV calculations |
 | Clerk JWT swap (web) | ✅ wired (commit c37cf03); flip API `dev_auth_enabled=false` in prod env | (no longer dev-only) |
@@ -129,7 +128,6 @@ Counterfeit ensemble is now **4/7 wired** end-to-end (FFT rosette + color profil
 
 - [ ] **Typography counterfeit detector** (ensemble #5) — needs PaddleOCR or similar (new dep). OCR + glyph-shape comparison to canonical font templates.
 - [ ] **Substrate paper detector** (ensemble #6) — manufacturer reference library now exists, but per-manufacturer paper-fluorescence training still needs a labeled flash-shot dataset (which we don't have). Distinct from embedding-anomaly: substrate looks at the *paper itself* under flash, not at art content.
-- [ ] **Holographic parallax detector** (ensemble #3) — needs the tilt shot in the capture flow. Two-angle optical flow on holo region.
 - [ ] **Siamese reference detector** (ensemble #1) — would be trained off the same data feeding the DinoV2 trainer skeleton; effectively the same fine-tune with a different head. Consider folding into the identification trainer rather than building a separate one.
 
 ---
@@ -194,6 +192,9 @@ Flash-shot dataset + substrate detector (4-6 weeks, hardware-dependent)
 ---
 
 ## Recently shipped
+
+### 2026-05-05
+- **Holographic-parallax counterfeit detector (#3 of 7)** (`feat: holographic-parallax counterfeit detector — 5/7 ensemble milestone`, a169349). Detector #3 of 7. New module `ml/pipelines/counterfeit/holographic/`. Dense Farnebäck optical flow between dewarped front + tilt_30 canonicals, restricted to a foil mask (CIELAB chroma > 30 AND HSV saturation > 80, opened with a 3×3 ellipse). Score is logistic-squashed flow-ratio inside-vs-outside the mask: ≥3× ratio → real holo (~0.95), ~1× ratio → flat fake (~0.05). Graceful UNVERIFIED on tilt_not_captured / no_holo_region (mask < 2%) / shape_mismatch / flow_computation_failed. Wired through ensemble.py (HOLOGRAPHIC_AUTHENTIC=0.65, COUNTERFEIT=0.35, MIN_CONFIDENCE=0.4 — placeholders, recalibration tool ratchets later), recalibration coverage, pipeline_runner stage 3.5 (TILT_30 added to OPTIONAL_SHOTS so dewarp soft-fails on it). 13 detector tests + 7 service + 1 end-to-end pipeline_runner test. **Counterfeit ensemble now 5/7 wired.** Documented limits: false-negatives on silver/gold mirror foil (low chroma); false-positives on highly-saturated full-art / Secret Lair non-foil cards.
 
 ### 2026-05-04 (late session — 8-commit batch via parallel agents)
 - **Typography counterfeit detector** (`feat: typography counterfeit detector — OCR title vs identified card name`, 4194511). Detector #5 of 7. New module `ml/pipelines/counterfeit/typography/`. RapidOCR (PP-OCR weights via ONNX Runtime, no Paddle dep) on the top-10% title ROI of the canonical 750×1050 dewarped front. Case-insensitive normalized Levenshtein vs. the identified card name from the identification stage. Logistic squash midpoint 0.35, slope 12: exact match → 0.985, 1-char typo → ~0.96, totally wrong → ~0.02. Graceful UNVERIFIED on no-identified-name / invalid-image / OCR-import-missing. Wired through ensemble.py (`TYPOGRAPHY_AUTHENTIC_THRESHOLD=0.65`, `_COUNTERFEIT=0.35`, `_MIN_CONFIDENCE=0.4`), recalibration tool (`CURRENT_THRESHOLDS` + `_PATCH_CONSTANT_NAMES`), pipeline_runner stage 3.5, and persisted to `detector_scores["typography"]` on AuthenticityResult. 18 detector tests + service + pipeline tests; 112 ml tests passing total.
