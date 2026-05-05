@@ -248,7 +248,9 @@ def test_analyze_typography_service_happy_path_returns_populated_result(
     assert r.extracted_text == "Lightning Bolt"
     assert r.expected_text == "Lightning Bolt"
     assert r.levenshtein_distance == 0
-    assert r.score >= 0.99
+    # Exact match → ~0.985 per the detector's sigmoid (midpoint=0.35,
+    # slope=12). Above the AUTHENTIC threshold (0.65) with margin.
+    assert r.score >= 0.98
     # Verdict maps to AUTHENTIC at the default thresholds.
     assert (
         counterfeit._verdict_from_typography(r) == AuthenticityVerdict.AUTHENTIC
