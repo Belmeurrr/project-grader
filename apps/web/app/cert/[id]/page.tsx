@@ -17,6 +17,8 @@ import {
   type Certificate,
   type DetectorScore,
   type Grade,
+  type Region,
+  type RegionSeverity,
   fetchCertificate,
 } from "@/lib/cert";
 
@@ -111,7 +113,187 @@ function GradesSection({ cert }: { cert: Certificate }) {
       <p className="mt-3 text-xs text-zinc-500">
         Confidence: {(primary.confidence * 100).toFixed(0)}%
       </p>
+      <DamageHeatmap regions={cert.regions} />
     </section>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Damage-heatmap overlay.
+//
+// Phase-1 MVP: a card-shaped div with absolutely-positioned cells, one
+// per entry in `cert.regions`. Pure CSS — no canvas, no WebGL. The
+// overlay is supplementary to the existing per-criterion grades grid;
+// it visualizes WHERE on the card the defects sit, not the numeric
+// scores (those stay in the grid above).
+//
+// Layout uses percentages so the card scales with viewport. Aspect
+// ratio is fixed at 2.5 / 3.5 (standard trading-card proportions) via
+// `aspect-[5/7]` so the corners visually land at the corners of a
+// real card rendering.
+// --------------------------------------------------------------------------
+
+const SEVERITY_RING_CLASSES: Record<RegionSeverity, string> = {
+  ok: "border-lime-500/60 bg-lime-500/15",
+  minor: "border-amber-500/60 bg-amber-500/15",
+  major: "border-red-500/60 bg-red-500/15",
+  unknown: "border-zinc-700 bg-zinc-800/40",
+};
+
+function DamageHeatmap({ regions }: { regions: Region[] }) {
+  if (regions.length === 0) return null;
+  const corners = regions.filter((r) => r.kind === "corner");
+  const edges = regions.filter((r) => r.kind === "edge");
+  const centering = regions.find((r) => r.kind === "centering");
+  const surface = regions.find((r) => r.kind === "surface");
+
+  return (
+    <div className="mt-6">
+      <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-400">
+        Defect map
+      </h3>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-6">
+        <div className="relative mx-auto aspect-[5/7] w-48 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40 sm:mx-0">
+          {centering && (
+            <div
+              className={`pointer-events-none absolute rounded-md border-2 ${SEVERITY_RING_CLASSES[centering.severity]}`}
+              style={{ top: "18%", bottom: "18%", left: "12%", right: "12%" }}
+              aria-label={`Centering: ${centering.severity}`}
+            />
+          )}
+          {edges.map((e) => (
+            <EdgeCell key={`edge-${e.position}`} region={e} />
+          ))}
+          {corners.map((c) => (
+            <CornerCell key={`corner-${c.position}`} region={c} />
+          ))}
+          {surface && (
+            <div
+              className={`pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border px-2 py-1 text-[10px] font-medium ${SEVERITY_RING_CLASSES[surface.severity]} text-zinc-200`}
+              aria-label={`Surface: ${surface.severity}`}
+            >
+              {surface.severity === "unknown"
+                ? "surface analysis pending"
+                : "surface"}
+            </div>
+          )}
+        </div>
+        <DamageHeatmapLegend />
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        Visualization only. Numeric subgrades above are the canonical scores.
+      </p>
+    </div>
+  );
+}
+
+function EdgeCell({ region }: { region: Region }) {
+  // Edges sit just inside each side of the card frame. Corner regions
+  // already cover the corners; the edge rectangles inset 12% on each
+  // end so they don't overlap.
+  const cls = SEVERITY_RING_CLASSES[region.severity];
+  const common = "pointer-events-none absolute rounded-sm border";
+  switch (region.position) {
+    case "top":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ top: "5%", left: "12%", right: "12%", height: "3%" }}
+          aria-label="Edge: top"
+        />
+      );
+    case "bottom":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ bottom: "5%", left: "12%", right: "12%", height: "3%" }}
+          aria-label="Edge: bottom"
+        />
+      );
+    case "left":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ left: "5%", top: "12%", bottom: "12%", width: "3%" }}
+          aria-label="Edge: left"
+        />
+      );
+    case "right":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ right: "5%", top: "12%", bottom: "12%", width: "3%" }}
+          aria-label="Edge: right"
+        />
+      );
+    default:
+      return null;
+  }
+}
+
+function CornerCell({ region }: { region: Region }) {
+  const cls = SEVERITY_RING_CLASSES[region.severity];
+  const common =
+    "pointer-events-none absolute h-5 w-5 rounded-full border-2";
+  switch (region.position) {
+    case "top_left":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ top: "3%", left: "3%" }}
+          aria-label="Corner: top-left"
+        />
+      );
+    case "top_right":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ top: "3%", right: "3%" }}
+          aria-label="Corner: top-right"
+        />
+      );
+    case "bottom_left":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ bottom: "3%", left: "3%" }}
+          aria-label="Corner: bottom-left"
+        />
+      );
+    case "bottom_right":
+      return (
+        <div
+          className={`${common} ${cls}`}
+          style={{ bottom: "3%", right: "3%" }}
+          aria-label="Corner: bottom-right"
+        />
+      );
+    default:
+      return null;
+  }
+}
+
+function DamageHeatmapLegend() {
+  const items: Array<{ label: string; severity: RegionSeverity }> = [
+    { label: "OK", severity: "ok" },
+    { label: "Minor", severity: "minor" },
+    { label: "Major", severity: "major" },
+    { label: "Unknown", severity: "unknown" },
+  ];
+  return (
+    <ul className="flex flex-row flex-wrap gap-3 sm:flex-col sm:gap-2">
+      {items.map((it) => (
+        <li
+          key={it.severity}
+          className="flex items-center gap-2 text-xs text-zinc-400"
+        >
+          <span
+            className={`inline-block h-3 w-3 rounded-sm border ${SEVERITY_RING_CLASSES[it.severity]}`}
+          />
+          {it.label}
+        </li>
+      ))}
+    </ul>
   );
 }
 

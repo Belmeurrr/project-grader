@@ -62,12 +62,44 @@ export type IdentifiedCard = {
   confidence: number;
 };
 
+/**
+ * Damage-heatmap region cell. Mirrors `RegionScore` in
+ * `apps/api/grader/schemas/submissions.py`. The cert page renders one
+ * absolutely-positioned div per entry — corners as small circles in
+ * the four corners, edges as long thin rectangles along each side,
+ * centering as a centered frame outline, and surface as a centered
+ * "analysis pending" badge. Severity (ok / minor / major / unknown)
+ * drives the color, not the score directly — keeps the overlay legible
+ * for users who don't know what 0.92 means.
+ */
+export type RegionKind = "centering" | "corner" | "edge" | "surface";
+export type RegionPosition =
+  | "top_left"
+  | "top_right"
+  | "bottom_left"
+  | "bottom_right"
+  | "top"
+  | "right"
+  | "bottom"
+  | "left"
+  | "whole_card";
+export type RegionSeverity = "ok" | "minor" | "major" | "unknown";
+
+export type Region = {
+  kind: RegionKind;
+  position: RegionPosition;
+  score: number | null;
+  severity: RegionSeverity;
+};
+
 export type Certificate = {
   cert_id: string;
   completed_at: string; // ISO8601
   identified_card: IdentifiedCard | null;
   grades: Grade[];
   authenticity: CertAuthenticity | null;
+  /** Damage-heatmap entries — additive to `grades`, not a replacement. */
+  regions: Region[];
 };
 
 const apiBaseUrl = (): string => {

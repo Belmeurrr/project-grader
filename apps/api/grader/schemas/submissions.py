@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +13,67 @@ from grader.db.models import (
     ShotKind,
     SubmissionStatus,
 )
+
+# --------------------------------------------------------------------------
+# Damage-heatmap region thresholds (Phase 1 MVP).
+#
+# Score → severity mapping for the public cert page's damage heatmap. The
+# midpoints below are PLACEHOLDERS — they were chosen by intuition pending
+# the empirical Grade-distribution work (the same exercise that produced
+# the counterfeit recalibration thresholds for rosette/color). Do not tune
+# them yet. The intent is purely to give the heatmap three visually
+# distinct buckets (green/amber/red) so users see a "Precision Defect
+# Mapping"–style overlay; the underlying numbers continue to be sourced
+# from the existing per-criterion grades for back-compat.
+# --------------------------------------------------------------------------
+REGION_SEVERITY_OK_THRESHOLD: float = 0.95
+REGION_SEVERITY_MINOR_THRESHOLD: float = 0.85
+
+
+RegionKind = Literal["centering", "corner", "edge", "surface"]
+RegionPosition = Literal[
+    "top_left",
+    "top_right",
+    "bottom_left",
+    "bottom_right",
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "whole_card",
+]
+RegionSeverity = Literal["ok", "minor", "major", "unknown"]
+
+
+def _severity_from_score(score: float | None) -> RegionSeverity:
+    """Map a normalized [0, 1] region score to a severity bucket.
+
+    Inputs above ``REGION_SEVERITY_OK_THRESHOLD`` (0.95) → "ok"; between
+    that and ``REGION_SEVERITY_MINOR_THRESHOLD`` (0.85) → "minor"; below
+    → "major"; ``None`` → "unknown" (e.g. corners/surface, whose trainers
+    are still skeletons in Phase 1)."""
+    if score is None:
+        return "unknown"
+    if score > REGION_SEVERITY_OK_THRESHOLD:
+        return "ok"
+    if score >= REGION_SEVERITY_MINOR_THRESHOLD:
+        return "minor"
+    return "major"
+
+
+class RegionScore(BaseModel):
+    """One cell of the public cert page's damage-heatmap overlay.
+
+    Phase-1 MVP scope: surface the per-region grades we already produce
+    (centering whole-card, an aggregate edges entry until the per-side
+    breakdown gets persisted, corner placeholders, and a surface
+    placeholder). The web overlay positions cells by ``position`` and
+    color-codes them by ``severity``."""
+
+    kind: RegionKind
+    position: RegionPosition
+    score: float | None = None
+    severity: RegionSeverity
 
 
 class SubmissionCreate(BaseModel):
@@ -172,3 +233,9 @@ class CertificatePublic(BaseModel):
     identified_card: IdentifiedCard | None = None
     grades: list[GradeOut] = Field(default_factory=list)
     authenticity: CertAuthenticityPublic | None = None
+    # Damage-heatmap regions. Purely additive; the existing
+    # per-criterion `grades` array stays the canonical source of truth
+    # for the numeric subgrades. Built fresh on each request from the
+    # primary Grade row — see `_build_regions_for_grade` in
+    # `grader.routers.cert`.
+    regions: list[RegionScore] = Field(default_factory=list)

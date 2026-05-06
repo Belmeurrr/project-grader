@@ -42,13 +42,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from grader.db import get_db
-from grader.db.models import CardVariant, Submission, SubmissionStatus
+from grader.db.models import CardVariant, Grade, Submission, SubmissionStatus
 from grader.schemas.submissions import (
     CertAuthenticityPublic,
     CertificatePublic,
     DetectorScorePublic,
     GradeOut,
     IdentifiedCard,
+    RegionScore,
+    _severity_from_score,
 )
 from grader.services.rate_limit import limiter
 
@@ -106,6 +108,14 @@ async def get_certificate(
         if submission.authenticity is not None
         else None
     )
+    # Damage-heatmap regions. PSA is the canonical scheme on the cert
+    # page; build the regions list off the PSA grade if present, else
+    # the first available scheme. Empty list when no grade row exists
+    # at all (a defensive case — COMPLETED submissions should always
+    # have a Grade row, but the cert endpoint already tolerates the
+    # `grades=[]` edge in `GradesSection` of the web page).
+    primary_grade = _primary_grade(submission)
+    regions = _build_regions_for_grade(primary_grade) if primary_grade else []
 
     response.headers["Cache-Control"] = _PUBLIC_CACHE_HEADER
     return CertificatePublic(
@@ -114,7 +124,91 @@ async def get_certificate(
         identified_card=_identified_card_or_none(submission),
         grades=grades,
         authenticity=auth,
+        regions=regions,
     )
+
+
+def _primary_grade(submission: Submission) -> Grade | None:
+    """Pick the canonical Grade row for the cert page.
+
+    The web cert page leads with PSA when present (``primary = ...
+    find scheme === "psa"``), so the heatmap should mirror that to keep
+    the numbers and the overlay self-consistent."""
+    if not submission.grades:
+        return None
+    for g in submission.grades:
+        if g.scheme.value == "psa":
+            return g
+    return submission.grades[0]
+
+
+def _build_regions_for_grade(grade: Grade) -> list[RegionScore]:
+    """Translate a Grade row into the public ``regions`` list.
+
+    Phase-1 MVP shape (10 entries):
+      - 1 centering, position=whole_card, score = grade.centering / 10
+      - 4 edges (top/right/bottom/left). The edges grader internally
+        emits per-side measurements (see
+        ``ml/pipelines/grading/edges/measure.py::SideMeasurement``) but
+        the persistence layer collapses to a single aggregate column
+        (``Grade.edges``). Until per-side scores are persisted to
+        ``Grade.distributions``, all four side entries share that
+        aggregate score. Documented gap; see TODO.md.
+      - 4 corners (top_left/top_right/bottom_left/bottom_right). The
+        corners trainer is a Phase-1 skeleton, so each entry surfaces
+        ``score=None`` / ``severity="unknown"``.
+      - 1 surface, position=whole_card, score=None / unknown today.
+
+    Scores are normalized from PSA's 0-10 grade scale to [0, 1] for the
+    severity mapping. None scores stay None; ``_severity_from_score``
+    handles the unknown bucket."""
+    regions: list[RegionScore] = []
+
+    centering_norm = grade.centering / 10.0 if grade.centering is not None else None
+    regions.append(
+        RegionScore(
+            kind="centering",
+            position="whole_card",
+            score=centering_norm,
+            severity=_severity_from_score(centering_norm),
+        )
+    )
+
+    edges_norm = grade.edges / 10.0 if grade.edges is not None else None
+    edges_severity = _severity_from_score(edges_norm)
+    for edge_pos in ("top", "right", "bottom", "left"):
+        regions.append(
+            RegionScore(
+                kind="edge",
+                position=edge_pos,  # type: ignore[arg-type]
+                score=edges_norm,
+                severity=edges_severity,
+            )
+        )
+
+    corners_norm = grade.corners / 10.0 if grade.corners is not None else None
+    corners_severity = _severity_from_score(corners_norm)
+    for corner_pos in ("top_left", "top_right", "bottom_left", "bottom_right"):
+        regions.append(
+            RegionScore(
+                kind="corner",
+                position=corner_pos,  # type: ignore[arg-type]
+                score=corners_norm,
+                severity=corners_severity,
+            )
+        )
+
+    surface_norm = grade.surface / 10.0 if grade.surface is not None else None
+    regions.append(
+        RegionScore(
+            kind="surface",
+            position="whole_card",
+            score=surface_norm,
+            severity=_severity_from_score(surface_norm),
+        )
+    )
+
+    return regions
 
 
 def _identified_card_or_none(submission: Submission) -> IdentifiedCard | None:

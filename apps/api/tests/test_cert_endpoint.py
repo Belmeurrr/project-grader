@@ -373,3 +373,94 @@ async def test_cert_endpoint_sets_cache_control(
     cc = r.headers.get("Cache-Control", "")
     assert "public" in cc
     assert "max-age" in cc
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_returns_damage_heatmap_regions(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """Damage-heatmap MVP: the cert payload includes a ``regions`` array
+    derived from the primary Grade row.
+
+    Phase-1 shape (10 entries):
+      - 1 centering (whole_card)
+      - 4 edges (top / right / bottom / left) — all sharing the
+        aggregate edges score until per-side scores get persisted
+      - 4 corners (top_left / top_right / bottom_left / bottom_right)
+      - 1 surface (whole_card)
+
+    Severity bucketing: centering=9.5/10 → 0.95 → ``minor`` (the
+    >0.95 boundary lands in the minor bucket per
+    ``REGION_SEVERITY_OK_THRESHOLD``); corners/edges/surface all None
+    → ``unknown``."""
+    user = User(
+        clerk_id=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@x",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    sub = Submission(
+        user_id=user.id,
+        status=SubmissionStatus.COMPLETED,
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(sub)
+    await db_session.flush()
+    grade = Grade(
+        submission_id=sub.id,
+        scheme=GradingScheme.PSA,
+        centering=9.5,
+        corners=None,
+        edges=None,
+        surface=None,
+        final=None,
+        confidence=0.4,
+    )
+    db_session.add(grade)
+    await db_session.flush()
+
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    regions = body["regions"]
+    assert isinstance(regions, list)
+    assert len(regions) == 10  # 1 centering + 4 edges + 4 corners + 1 surface
+
+    by_kind: dict[str, list[dict]] = {}
+    for reg in regions:
+        by_kind.setdefault(reg["kind"], []).append(reg)
+
+    # Centering — single whole_card entry; 9.5 / 10 = 0.95 → "minor".
+    assert len(by_kind["centering"]) == 1
+    centering = by_kind["centering"][0]
+    assert centering["position"] == "whole_card"
+    assert centering["score"] == pytest.approx(0.95)
+    assert centering["severity"] == "minor"
+
+    # Edges — 4 entries with the canonical position names; score None
+    # today (the Grade row has edges=None) so severity is unknown.
+    edge_positions = {e["position"] for e in by_kind["edge"]}
+    assert edge_positions == {"top", "right", "bottom", "left"}
+    for e in by_kind["edge"]:
+        assert e["score"] is None
+        assert e["severity"] == "unknown"
+
+    # Corners — 4 placeholders, all unknown.
+    corner_positions = {c["position"] for c in by_kind["corner"]}
+    assert corner_positions == {
+        "top_left",
+        "top_right",
+        "bottom_left",
+        "bottom_right",
+    }
+    for c in by_kind["corner"]:
+        assert c["score"] is None
+        assert c["severity"] == "unknown"
+
+    # Surface — single whole_card placeholder.
+    assert len(by_kind["surface"]) == 1
+    surface = by_kind["surface"][0]
+    assert surface["position"] == "whole_card"
+    assert surface["score"] is None
+    assert surface["severity"] == "unknown"
