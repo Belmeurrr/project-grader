@@ -78,6 +78,25 @@ async def app(db_session: AsyncSession) -> AsyncIterator[FastAPI]:
     application = create_app()
 
     async def _override_get_db() -> AsyncIterator[AsyncSession]:
+        # Expire identity-map state at the start of each request so handlers
+        # don't see stale snapshots of rows that were written by test setup
+        # (or a previous request in the same test) via the same session.
+        #
+        # Why this matters: the test fixture shares one AsyncSession between
+        # the test body's setup writes and the request handlers (we override
+        # `get_db` to yield this session). After a flush/commit, rows live
+        # in the session's identity map. When a request handler then calls
+        # `db.get(Model, id, options=[selectinload(...)])`, the identity-map
+        # cache hit returns the in-memory instance and the eager-load options
+        # are silently dropped. Production code in `_to_out` then accesses a
+        # relationship that was never loaded, triggering a sync lazy-load
+        # under asyncpg → `sqlalchemy.exc.MissingGreenlet`.
+        #
+        # `expire_all()` marks every persistent instance as needing a refresh,
+        # which combined with `populate_existing=True` on the production
+        # `db.get` calls makes selectinload options actually apply on
+        # identity-map hits.
+        db_session.expire_all()
         yield db_session
 
     application.dependency_overrides[get_db] = _override_get_db

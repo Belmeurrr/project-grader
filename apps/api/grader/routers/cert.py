@@ -83,6 +83,12 @@ async def get_certificate(
                 CardVariant.set
             ),
         ],
+        # `populate_existing=True` forces the eager-load options to apply
+        # even on identity-map hits — required when a caller (e.g. the
+        # test fixture or a worker) has just written the row in the same
+        # session, otherwise the selectinload chain is silently dropped
+        # and the response code lazy-loads under asyncpg → MissingGreenlet.
+        populate_existing=True,
     )
     if submission is None or submission.status != SubmissionStatus.COMPLETED:
         raise HTTPException(

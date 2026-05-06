@@ -58,7 +58,25 @@ async def create_submission(
     )
     db.add(submission)
     await db.commit()
-    await db.refresh(submission)
+    # Re-fetch with the same selectinload options that `_to_out` requires,
+    # using `populate_existing=True` so the options apply even though the
+    # row is already in the identity map from the just-committed write.
+    # Without this the relationship attributes (`.grades`, `.authenticity`,
+    # `.identified_variant`) are unloaded and accessing them in `_to_out`
+    # triggers a sync lazy-load under asyncpg → MissingGreenlet.
+    submission = await db.get(
+        Submission,
+        submission.id,
+        options=[
+            selectinload(Submission.grades),
+            selectinload(Submission.authenticity),
+            selectinload(Submission.identified_variant).selectinload(
+                CardVariant.set
+            ),
+        ],
+        populate_existing=True,
+    )
+    assert submission is not None  # we just committed it
     return _to_out(submission)
 
 
@@ -78,6 +96,12 @@ async def get_submission(
                 CardVariant.set
             ),
         ],
+        # `populate_existing=True` makes the eager-load options apply even
+        # when the row is already in the session's identity map (e.g. from
+        # a recent write in the same async session). Without it, a cache
+        # hit silently drops the selectinload options and `_to_out` then
+        # triggers a sync lazy-load under asyncpg → MissingGreenlet.
+        populate_existing=True,
     )
     if submission is None or submission.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="submission not found")
