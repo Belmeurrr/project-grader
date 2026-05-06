@@ -75,7 +75,14 @@ function Header({ cert }: { cert: Certificate }) {
 }
 
 function GradesSection({ cert }: { cert: Certificate }) {
-  if (cert.grades.length === 0) {
+  // PSA-scheme grade is the canonical one; if multiple schemes ever land,
+  // PSA is what the cert page leads with. With `noUncheckedIndexedAccess`
+  // on, `cert.grades[0]` widens to `Grade | undefined`, so we use an
+  // explicit guard rather than `!` — covers both the empty-array case
+  // and narrows `primary` to `Grade` for the rest of the function.
+  const primary: Grade | undefined =
+    cert.grades.find((g) => g.scheme === "psa") ?? cert.grades[0];
+  if (!primary) {
     return (
       <section className="rounded-xl border border-zinc-800 p-6 text-zinc-400">
         <h2 className="mb-2 text-base font-medium text-zinc-200">Grade</h2>
@@ -83,9 +90,6 @@ function GradesSection({ cert }: { cert: Certificate }) {
       </section>
     );
   }
-  // PSA-scheme grade is the canonical one; if multiple schemes ever land,
-  // PSA is what the cert page leads with.
-  const primary = cert.grades.find((g) => g.scheme === "psa") ?? cert.grades[0];
   return (
     <section>
       <h2 className="mb-3 text-base font-medium text-zinc-200">
