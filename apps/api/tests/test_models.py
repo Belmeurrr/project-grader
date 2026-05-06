@@ -26,6 +26,7 @@ from grader.db.models import (
 )
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_user_create_roundtrip(db_session: AsyncSession) -> None:
     user = User(clerk_id="user_test_1", email="t1@example.com", display_name="Test")
@@ -39,6 +40,7 @@ async def test_user_create_roundtrip(db_session: AsyncSession) -> None:
     assert fetched.training_consent is False  # server default
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_card_set_and_variant_relationship(db_session: AsyncSession) -> None:
     cs = CardSet(game=Game.MTG, code="LEA", name="Limited Edition Alpha")
@@ -60,6 +62,7 @@ async def test_card_set_and_variant_relationship(db_session: AsyncSession) -> No
     assert cs.variants[0].name == "Black Lotus"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_submission_shot_cascade_delete(db_session: AsyncSession) -> None:
     user = User(clerk_id="user_cascade", email="cascade@example.com")
@@ -87,6 +90,7 @@ async def test_submission_shot_cascade_delete(db_session: AsyncSession) -> None:
     assert remaining is None
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_grade_unique_per_scheme(db_session: AsyncSession) -> None:
     user = User(clerk_id="user_grade", email="grade@example.com")
@@ -124,6 +128,7 @@ async def test_grade_unique_per_scheme(db_session: AsyncSession) -> None:
         await db_session.commit()
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_authenticity_one_to_one(db_session: AsyncSession) -> None:
     user = User(clerk_id="user_auth", email="auth@example.com")
@@ -157,6 +162,7 @@ async def test_authenticity_one_to_one(db_session: AsyncSession) -> None:
         await db_session.commit()
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_audit_log_with_jsonb_payload(db_session: AsyncSession) -> None:
     log = AuditLog(actor="system", action="submission.created", payload={"foo": "bar", "n": 1})

@@ -35,6 +35,10 @@ from grader.workers.reconciler import (
     reconcile_stale_submissions_async,
 )
 
+# Every test exercises the reconciler against real Submission/AuditLog
+# rows in the test DB — needs Postgres.
+pytestmark = pytest.mark.requires_postgres
+
 
 async def _make_user(db: AsyncSession) -> User:
     user = User(clerk_id=f"u_{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex[:8]}@x")

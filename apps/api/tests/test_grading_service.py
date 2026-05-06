@@ -146,6 +146,7 @@ async def _make_submission(db: AsyncSession) -> Submission:
     return sub
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_persist_centering_inserts_new_grade_row(
     s3_bucket: str, db_session: AsyncSession
@@ -169,6 +170,7 @@ async def test_persist_centering_inserts_new_grade_row(
     assert grade.model_versions["centering"] == "geometric-v1"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_persist_centering_updates_existing_grade(
     s3_bucket: str, db_session: AsyncSession
@@ -190,6 +192,7 @@ async def test_persist_centering_updates_existing_grade(
     assert g2.centering < g1.centering
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_persist_centering_preserves_other_criteria_when_updating(
     s3_bucket: str, db_session: AsyncSession
@@ -263,6 +266,7 @@ def test_grade_edges_raises_on_missing_canonical(s3_bucket: str) -> None:
 # -----------------------------
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_persist_edges_requires_existing_centering_row(
     s3_bucket: str, db_session: AsyncSession
@@ -278,6 +282,7 @@ async def test_persist_edges_requires_existing_centering_row(
         )
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_persist_edges_updates_existing_grade(
     s3_bucket: str, db_session: AsyncSession
@@ -309,6 +314,7 @@ async def test_persist_edges_updates_existing_grade(
     assert grade2.final is None
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_persist_edges_recomputes_final_when_complete(
     s3_bucket: str, db_session: AsyncSession

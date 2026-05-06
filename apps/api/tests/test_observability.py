@@ -140,6 +140,7 @@ async def test_request_timer_logs_one_line_per_request() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_pipeline_emits_stage_completed_per_heavy_stage(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch

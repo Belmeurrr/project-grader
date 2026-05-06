@@ -32,6 +32,10 @@ from grader.db.models import (
     User,
 )
 
+# Every test in this module exercises the FastAPI client against a real
+# Postgres test DB via the `client`/`db_session` fixtures.
+pytestmark = pytest.mark.requires_postgres
+
 
 async def _make_completed_submission(
     db: AsyncSession,

@@ -29,6 +29,10 @@ from pipelines.identification import (
 )
 from tests.fixtures import card_in_scene, synth_card
 
+# All tests use `db_session` to persist the Submission/User/AuditLog rows
+# the service writes — needs Postgres.
+pytestmark = pytest.mark.requires_postgres
+
 
 @pytest.fixture(autouse=True)
 def _aws_creds_for_moto() -> Iterator[None]:

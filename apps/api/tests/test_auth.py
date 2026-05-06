@@ -122,6 +122,7 @@ async def prod_settings(monkeypatch: pytest.MonkeyPatch) -> Any:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_dev_mode_accepts_dev_scheme_and_creates_user(
     client: httpx.AsyncClient,
@@ -138,6 +139,7 @@ async def test_dev_mode_accepts_dev_scheme_and_creates_user(
     assert user.email == f"{token}@dev.local"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_dev_mode_missing_auth_returns_401(client: httpx.AsyncClient) -> None:
     r = await client.post("/submissions", json={})
@@ -145,6 +147,7 @@ async def test_dev_mode_missing_auth_returns_401(client: httpx.AsyncClient) -> N
     assert r.json()["detail"] == "missing auth"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_dev_mode_bad_scheme_returns_401(client: httpx.AsyncClient) -> None:
     r = await client.post(
@@ -156,6 +159,7 @@ async def test_dev_mode_bad_scheme_returns_401(client: httpx.AsyncClient) -> Non
     assert r.json()["detail"] == "bad auth scheme"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_dev_mode_empty_token_returns_401(client: httpx.AsyncClient) -> None:
     r = await client.post(
@@ -187,6 +191,7 @@ def _jwks_response(public_pem: str, kid: str) -> dict[str, Any]:
     return {"keys": [jwk]}
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_valid_jwt_authenticates(
     client: httpx.AsyncClient,
@@ -216,6 +221,7 @@ async def test_prod_mode_valid_jwt_authenticates(
     assert user.email == "real@user.example"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_email_falls_back_to_placeholder(
     client: httpx.AsyncClient,
@@ -245,6 +251,7 @@ async def test_prod_mode_email_falls_back_to_placeholder(
     assert user.email == "user_no_email@user.clerk"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_existing_user_is_reused(
     client: httpx.AsyncClient,
@@ -283,6 +290,7 @@ async def test_prod_mode_existing_user_is_reused(
     assert users[0].email == "prior@example.com"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_expired_jwt_returns_401(
     client: httpx.AsyncClient, prod_settings: Any
@@ -309,6 +317,7 @@ async def test_prod_mode_expired_jwt_returns_401(
     assert "expired" in r.json()["detail"].lower()
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_wrong_issuer_returns_401(
     client: httpx.AsyncClient, prod_settings: Any
@@ -332,6 +341,7 @@ async def test_prod_mode_wrong_issuer_returns_401(
     assert "issuer" in r.json()["detail"].lower()
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_malformed_jwt_returns_401(
     client: httpx.AsyncClient, prod_settings: Any
@@ -347,6 +357,7 @@ async def test_prod_mode_malformed_jwt_returns_401(
     assert "malformed" in r.json()["detail"].lower()
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_unknown_kid_returns_401(
     client: httpx.AsyncClient, prod_settings: Any
@@ -371,6 +382,7 @@ async def test_prod_mode_unknown_kid_returns_401(
     assert "unknown signing key" in r.json()["detail"].lower()
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_bad_scheme_returns_401(
     client: httpx.AsyncClient, prod_settings: Any
@@ -384,6 +396,7 @@ async def test_prod_mode_bad_scheme_returns_401(
     assert r.json()["detail"] == "bad auth scheme"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_audience_enforced_when_configured(
     client: httpx.AsyncClient,
@@ -420,6 +433,7 @@ async def test_prod_mode_audience_enforced_when_configured(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_jwks_cache_reuses_within_ttl(
     client: httpx.AsyncClient, prod_settings: Any
@@ -519,6 +533,7 @@ def test_dev_auth_explicit_override_wins(monkeypatch: pytest.MonkeyPatch) -> Non
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_unverified_email_is_rejected(
     client: httpx.AsyncClient,
@@ -554,6 +569,7 @@ async def test_prod_mode_unverified_email_is_rejected(
     assert rows.scalar_one_or_none() is None
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_missing_email_verified_claim_is_rejected(
     client: httpx.AsyncClient, prod_settings: Any
@@ -580,6 +596,7 @@ async def test_prod_mode_missing_email_verified_claim_is_rejected(
     assert r.json()["detail"] == "email_not_verified"
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_prod_mode_verified_email_passes(
     client: httpx.AsyncClient,

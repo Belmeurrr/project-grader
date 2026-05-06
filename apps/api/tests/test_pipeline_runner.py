@@ -43,6 +43,10 @@ from pipelines.identification import (
 )
 from tests.fixtures import card_in_scene, encode_jpeg, synth_card
 
+# Every test runs `run_pipeline` against a real Submission row through
+# the `db_session` fixture — needs Postgres.
+pytestmark = pytest.mark.requires_postgres
+
 
 @pytest.fixture(autouse=True)
 def _aws_creds() -> Iterator[None]:

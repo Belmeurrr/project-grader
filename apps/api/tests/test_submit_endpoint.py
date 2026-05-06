@@ -22,6 +22,10 @@ from grader.services import storage
 from grader.settings import get_settings
 from tests.fixtures import card_in_scene, encode_jpeg
 
+# Every test drives POST /submissions/{id}/submit through the FastAPI
+# client + persists rows via the `client`/`db_session` fixtures.
+pytestmark = pytest.mark.requires_postgres
+
 
 @pytest.fixture(autouse=True)
 def _aws_creds() -> Iterator[None]:

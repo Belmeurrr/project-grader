@@ -79,6 +79,7 @@ def _add_variant(
     return cv
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_find_by_phash_returns_exact_match(db_session, session_factory) -> None:
     cs = CardSet(game=Game.MTG, code="UTS", name="UnitTestSet")
@@ -103,6 +104,7 @@ async def test_find_by_phash_returns_exact_match(db_session, session_factory) ->
     assert hits[0].distance == 0
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_find_by_phash_within_distance(db_session, session_factory) -> None:
     cs = CardSet(game=Game.MTG, code="UTS", name="UnitTestSet")
@@ -123,6 +125,7 @@ async def test_find_by_phash_within_distance(db_session, session_factory) -> Non
     assert hits[0].distance == 3
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_find_by_phash_high_bit_round_trip(db_session, session_factory) -> None:
     """Bigint two's-complement: a hash >= 2^63 must still match itself."""
@@ -139,6 +142,7 @@ async def test_find_by_phash_high_bit_round_trip(db_session, session_factory) ->
     assert hits[0].entry.variant_id == str(var.id)
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_nearest_by_embedding_orders_by_cosine_distance(
     db_session, session_factory
@@ -166,6 +170,7 @@ async def test_nearest_by_embedding_orders_by_cosine_distance(
     assert hits[0].distance < hits[1].distance
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.asyncio
 async def test_nearest_by_embedding_skips_null_embeddings(
     db_session, session_factory

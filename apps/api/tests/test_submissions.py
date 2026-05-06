@@ -20,6 +20,10 @@ from grader.db.models import (
     SubmissionStatus,
 )
 
+# Every test drives the FastAPI client + persists Submission rows via
+# the `client`/`db_session` fixtures.
+pytestmark = pytest.mark.requires_postgres
+
 
 @pytest.mark.asyncio
 async def test_create_submission_requires_auth(client: httpx.AsyncClient) -> None:

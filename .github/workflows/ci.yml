@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel in-flight CI on the same ref when a new commit lands. Saves
+# minutes on PR pushes; the latest commit is the only result that
+# matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.7"
+      - name: Install ml deps (with dev extras for pytest)
+        run: uv sync --extra dev
+        working-directory: ml
+      - name: Run ml tests
+        run: uv run pytest -x -q
+        working-directory: ml
+
+  api-unit:
+    # Unit slice only — the `requires_postgres` marker filters out tests
+    # that need a live Postgres + pgvector. Integration tests run later
+    # against a service container once they earn their keep.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.7"
+      - name: Install api deps (with dev extras for pytest, moto)
+        run: uv sync --extra dev
+        working-directory: apps/api
+      - name: Run api unit tests
+        run: uv run pytest -x -q -m "not requires_postgres"
+        working-directory: apps/api
+
+  web-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          # The lockfile lives at the monorepo root — pnpm-workspace.yaml
+          # at the root maps `apps/web` and friends in.
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install workspace deps
+        run: pnpm install --frozen-lockfile
+      - name: Type-check web
+        run: pnpm --filter web typecheck

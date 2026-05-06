@@ -24,6 +24,10 @@ from tests.fixtures import (
     with_glare,
 )
 
+# Every test in this module drives the FastAPI client + submission_shots
+# rows through the `client`/`db_session` fixtures.
+pytestmark = pytest.mark.requires_postgres
+
 
 @pytest.fixture(autouse=True)
 def _aws_creds_for_moto() -> Iterator[None]:
