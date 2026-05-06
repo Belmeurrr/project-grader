@@ -37,6 +37,11 @@ dev = [
   "pytest-cov>=6.0.0",
   "ruff>=0.7.0",
   "mypy>=1.13.0",
+  # Property-based tests (test_*_property.py) use hypothesis to drive
+  # monotonicity invariants across the typography + embedding-anomaly
+  # detectors. Each test generates a many-pair sample so the calibration
+  # midpoint/slope cannot drift without breaking a property assertion.
+  "hypothesis>=6.115.0",
 ]
 
 [build-system]

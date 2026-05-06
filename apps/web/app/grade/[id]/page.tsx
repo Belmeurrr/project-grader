@@ -231,7 +231,12 @@ function StatusPill({ status }: { status: SubmissionStatus }) {
   );
 }
 
-function Body({
+// Exported for unit-testing. The default export above wires this into
+// the App-Router page, but the wizard's status-switching behavior (and
+// the frontPassed gate inside <Wizard/>) is the regression risk we want
+// to cover with @testing-library/react. Importing Body directly avoids
+// having to mock `next/navigation` + `use(params)` in the test path.
+export function Body({
   submission,
   authedFetch,
   onShotsChanged,
