@@ -78,6 +78,10 @@ CURRENT_THRESHOLDS: dict[str, tuple[float, float]] = {
         ensemble.HOLOGRAPHIC_AUTHENTIC_THRESHOLD,
         ensemble.HOLOGRAPHIC_COUNTERFEIT_THRESHOLD,
     ),
+    "knn_reference": (
+        ensemble.KNN_REFERENCE_AUTHENTIC_THRESHOLD,
+        ensemble.KNN_REFERENCE_COUNTERFEIT_THRESHOLD,
+    ),
 }
 
 

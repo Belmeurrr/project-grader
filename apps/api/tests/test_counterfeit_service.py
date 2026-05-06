@@ -602,6 +602,172 @@ def test_analyze_embedding_anomaly_runs_detector_when_references_present(
     assert m.metadata.get("reason") is None
 
 
+# -----------------------------
+# analyze_knn_reference_service — abstain paths and detector path
+# -----------------------------
+
+
+def test_analyze_knn_reference_service_abstains_when_submitted_embedding_missing(
+    tmp_path: Path,
+) -> None:
+    """No submitted embedding (e.g. identification short-circuited on a
+    pHash exact match) → no-signal measurement with
+    abstain_reason='no_submitted_embedding'. Mirrors embedding-anomaly's
+    abstain shape — both detectors share the same submitted-embedding
+    source, so they share this failure mode."""
+    m = counterfeit.analyze_knn_reference_service(
+        submitted_embedding=None,
+        manufacturer="mtg",
+        variant_id="some-variant",
+        references_store_path=tmp_path / "doesnt_exist.npz",
+    )
+    assert m.n_references_used == 0
+    assert m.confidence == 0.0
+    assert m.abstain_reason == "no_submitted_embedding"
+    assert (
+        counterfeit._verdict_from_knn_reference(m) == AuthenticityVerdict.UNVERIFIED
+    )
+
+
+def test_analyze_knn_reference_service_abstains_when_unidentified(
+    tmp_path: Path,
+) -> None:
+    """Submitted embedding present but card not identified → no variant
+    to look up → 'insufficient_references' abstain (per the service's
+    documented mapping for unidentified-but-have-embedding)."""
+    m = counterfeit.analyze_knn_reference_service(
+        submitted_embedding=np.random.default_rng(0).standard_normal(8).astype(np.float32),
+        manufacturer=None,
+        variant_id=None,
+        references_store_path=tmp_path / "doesnt_exist.npz",
+    )
+    assert m.n_references_used == 0
+    assert m.confidence == 0.0
+    assert m.abstain_reason == "insufficient_references"
+
+
+def test_analyze_knn_reference_service_abstains_when_too_few_references(
+    tmp_path: Path,
+) -> None:
+    """References npz exists with a single reference for the variant —
+    fewer than k=3 — so the detector abstains. The whole point of
+    top-k is that it requires AT LEAST k references; below that it
+    silently degenerates into nearest-neighbor on a tiny set."""
+    npz = tmp_path / "ref.npz"
+    ref = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    np.savez(str(npz), **{"mtg/abc-123": ref})
+
+    m = counterfeit.analyze_knn_reference_service(
+        submitted_embedding=ref.copy(),
+        manufacturer="mtg",
+        variant_id="abc-123",
+        references_store_path=npz,
+    )
+    assert m.n_references_used == 1  # one ref on file but < k=3
+    assert m.abstain_reason == "insufficient_references"
+    assert (
+        counterfeit._verdict_from_knn_reference(m) == AuthenticityVerdict.UNVERIFIED
+    )
+
+
+def test_analyze_knn_reference_service_abstains_when_variant_not_in_store(
+    tmp_path: Path,
+) -> None:
+    """References npz exists but doesn't have an entry for the requested
+    variant → no_references abstain via the underlying lookup_references
+    returning None → 'insufficient_references' from the detector."""
+    npz = tmp_path / "ref.npz"
+    np.savez(
+        str(npz),
+        **{"mtg/other-variant": np.zeros((3, 8), dtype=np.float32)},
+    )
+
+    m = counterfeit.analyze_knn_reference_service(
+        submitted_embedding=np.zeros(8, dtype=np.float32),
+        manufacturer="mtg",
+        variant_id="missing-variant",
+        references_store_path=npz,
+    )
+    assert m.n_references_used == 0
+    assert m.abstain_reason == "insufficient_references"
+
+
+def test_analyze_knn_reference_service_runs_detector_when_enough_references(
+    tmp_path: Path,
+) -> None:
+    """Identified variant + 3+ reference exemplars → detector runs and
+    returns a real (non-abstain) measurement. With submitted == one of
+    the references, top-k mean is small → high authenticity score."""
+    npz = tmp_path / "ref.npz"
+    rng = np.random.default_rng(0xC4FF)
+    base = rng.standard_normal(8).astype(np.float32)
+    base /= float(np.linalg.norm(base))
+    # 5 same-variant references in a tight cluster around `base`.
+    refs = []
+    for _ in range(5):
+        v = base + rng.standard_normal(8).astype(np.float32) * 0.05
+        v /= float(np.linalg.norm(v))
+        refs.append(v)
+    refs_arr = np.stack(refs).astype(np.float32)
+    np.savez(str(npz), **{"mtg/abc-123": refs_arr})
+
+    m = counterfeit.analyze_knn_reference_service(
+        submitted_embedding=base.copy(),
+        manufacturer="mtg",
+        variant_id="abc-123",
+        references_store_path=npz,
+    )
+    assert m.abstain_reason is None
+    assert m.n_references_used == 5
+    assert m.k == 3
+    assert m.confidence >= 0.4
+    # Submitted == base; references are tightly clustered near base.
+    # Mean top-3 cosine distance is very small → score saturates near 1.
+    assert m.score >= 0.9
+    assert m.mean_topk_distance < 0.05
+
+
+def test_verdict_from_knn_reference_maps_to_enum() -> None:
+    """The string verdicts from ml/pipelines/counterfeit/ensemble round-
+    trip cleanly into the SQLAlchemy AuthenticityVerdict enum for k-NN
+    reference. Mirrors the matching tests for the other 5 detectors."""
+    from pipelines.counterfeit.knn_reference import KnnReferenceResult
+
+    AV = AuthenticityVerdict
+    abstain = KnnReferenceResult(
+        score=0.5,
+        confidence=0.0,
+        mean_topk_distance=0.0,
+        n_references_used=0,
+        k=3,
+        abstain_reason="insufficient_references",
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_knn_reference(abstain) == AV.UNVERIFIED
+
+    authentic = KnnReferenceResult(
+        score=0.95,
+        confidence=0.85,
+        mean_topk_distance=0.05,
+        n_references_used=10,
+        k=3,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_knn_reference(authentic) == AV.AUTHENTIC
+
+    fake = KnnReferenceResult(
+        score=0.05,
+        confidence=0.85,
+        mean_topk_distance=0.50,
+        n_references_used=10,
+        k=3,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_knn_reference(fake) == AV.LIKELY_COUNTERFEIT
+
+
 def test_verdict_from_embedding_anomaly_maps_to_enum() -> None:
     """The string verdicts from ml/pipelines/counterfeit/ensemble round-
     trip cleanly into the SQLAlchemy AuthenticityVerdict enum."""

@@ -244,7 +244,7 @@ async def run_pipeline(
             duration_ms=round((time.perf_counter() - stage_start) * 1000.0, 2),
         )
 
-    # Stage 3.5: counterfeit-authenticity check. Five detectors:
+    # Stage 3.5: counterfeit-authenticity check. Six detectors:
     #   - rosette FFT (image-only)
     #   - color profile (image-only)
     #   - embedding anomaly (depends on identification result + reference
@@ -254,6 +254,11 @@ async def run_pipeline(
     #   - holographic parallax (depends on the optional tilt_30 shot;
     #     gracefully abstains when tilt isn't captured or no foil region
     #     is detected on the front shot)
+    #   - k-NN reference (sibling to embedding-anomaly: same npz, but
+    #     mean cosine distance to top-k authentic exemplars instead of
+    #     centroid distance — catches manifold cases the centroid misses;
+    #     gracefully abstains when the variant has fewer than k references
+    #     on file or no submitted embedding is available)
     # The combined verdict is the conservative ensemble in
     # `_combine_verdicts`. Soft-fail: a detector blow-up should not block
     # grading; the verdict (including UNVERIFIED on failure) is recorded
@@ -287,6 +292,16 @@ async def run_pipeline(
                 front_canonical_key,
                 tilt_canonical_key,
             )
+            # k-NN reference: sibling to embedding-anomaly. Same submitted
+            # embedding + same npz lookup; mean cosine distance to top-k
+            # authentic exemplars (vs. centroid distance for #7). Both
+            # detectors run — they catch different geometric failure modes.
+            knn_reference_measurement = counterfeit.analyze_knn_reference_service(
+                submitted_embedding=id_outcome.result.submitted_embedding,
+                manufacturer=chosen.entry.game if chosen is not None else None,
+                variant_id=chosen.entry.variant_id if chosen is not None else None,
+                references_store_path=get_settings().references_embeddings_path,
+            )
             authenticity = await counterfeit.persist_authenticity_result(
                 submission_id=submission.id,
                 rosette=rosette_measurement,
@@ -294,6 +309,7 @@ async def run_pipeline(
                 embedding=embedding_measurement,
                 typography=typography_measurement,
                 holographic=holographic_measurement,
+                knn_reference=knn_reference_measurement,
                 db=db,
             )
             db.add(
@@ -335,6 +351,19 @@ async def run_pipeline(
                             else None
                         ),
                         "tilt_canonical_present": tilt_canonical_key is not None,
+                        "knn_reference_score": float(
+                            knn_reference_measurement.score
+                        ),
+                        "knn_reference_confidence": float(
+                            knn_reference_measurement.confidence
+                        ),
+                        "knn_reference_n_references_used": int(
+                            knn_reference_measurement.n_references_used
+                        ),
+                        "knn_reference_mean_topk_distance": float(
+                            knn_reference_measurement.mean_topk_distance
+                        ),
+                        "knn_reference_k": int(knn_reference_measurement.k),
                         "combined_confidence": float(authenticity.confidence),
                     },
                 )

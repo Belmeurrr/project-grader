@@ -40,6 +40,11 @@ from pipelines.counterfeit.holographic import (
     HolographicResult,
     analyze_holographic_parallax,
 )
+from pipelines.counterfeit.knn_reference import (
+    DEFAULT_K as KNN_REFERENCE_DEFAULT_K,
+    KnnReferenceResult,
+    analyze_knn_reference,
+)
 from pipelines.counterfeit.rosette import (
     RosetteMeasurement,
     measure_rosette,
@@ -73,6 +78,10 @@ HOLOGRAPHIC_AUTHENTIC_THRESHOLD = ensemble.HOLOGRAPHIC_AUTHENTIC_THRESHOLD
 HOLOGRAPHIC_COUNTERFEIT_THRESHOLD = ensemble.HOLOGRAPHIC_COUNTERFEIT_THRESHOLD
 HOLOGRAPHIC_MIN_CONFIDENCE = ensemble.HOLOGRAPHIC_MIN_CONFIDENCE
 HOLOGRAPHIC_MODEL_VERSION = ensemble.HOLOGRAPHIC_MODEL_VERSION
+KNN_REFERENCE_AUTHENTIC_THRESHOLD = ensemble.KNN_REFERENCE_AUTHENTIC_THRESHOLD
+KNN_REFERENCE_COUNTERFEIT_THRESHOLD = ensemble.KNN_REFERENCE_COUNTERFEIT_THRESHOLD
+KNN_REFERENCE_MIN_CONFIDENCE = ensemble.KNN_REFERENCE_MIN_CONFIDENCE
+KNN_REFERENCE_MODEL_VERSION = ensemble.KNN_REFERENCE_MODEL_VERSION
 
 
 class CounterfeitFailedError(Exception):
@@ -198,6 +207,90 @@ def _no_signal_embedding_measurement(*, reason: str) -> EmbeddingAnomalyMeasurem
         confidence=0.0,
         manufacturer_profile="generic",
         metadata={"reason": reason},
+    )
+
+
+def analyze_knn_reference_service(
+    submitted_embedding: np.ndarray | None,
+    *,
+    manufacturer: str | None,
+    variant_id: str | None,
+    references_store_path: str | Path,
+    k: int = KNN_REFERENCE_DEFAULT_K,
+) -> KnnReferenceResult:
+    """Run the k-NN reference counterfeit detector.
+
+    Sibling to `analyze_embedding_anomaly`: same npz lookup, same
+    submitted-embedding source, but reduces the reference set via
+    mean-cosine-distance-to-top-k instead of cosine-distance-to-centroid.
+    The two detectors coexist as separate signals — see the docstring
+    on `pipelines.counterfeit.knn_reference.detector` for why.
+
+    Abstain paths (all yield UNVERIFIED downstream):
+      - submitted_embedding is None: identification didn't produce one
+        (e.g. pHash short-circuit). reason='no_submitted_embedding'.
+      - manufacturer or variant_id is None: card was not identified to
+        a known variant. Falls into 'no_submitted_embedding' shape if
+        we don't even have an embedding, or 'insufficient_references'
+        when we do but can't look anything up. We pick
+        'no_submitted_embedding' for the no-embedding case (matches the
+        detector's first abstain branch) and 'insufficient_references'
+        for unidentified-but-have-embedding (no references to look up).
+      - The variant has no references stored, or fewer than `k` of them:
+        reason='insufficient_references'. The detector itself enforces
+        the n_refs >= k floor.
+
+    Args:
+        submitted_embedding: float32 (d,) embedding of the submitted
+            canonical, or None if unavailable. Same semantics as the
+            embedding-anomaly service.
+        manufacturer: short-name from the catalog entry's `game` field
+            ("mtg", "pokemon", ...). None if unidentified.
+        variant_id: per-printing string id matching the references
+            store keys (Scryfall UUID for MTG, "<set>-<num>" for
+            Pokemon). None if unidentified.
+        references_store_path: path to the npz archive produced by
+            `ml/data/ingestion/reference_embeddings.embed_references`.
+        k: number of nearest references to average over. Default
+            matches the detector's DEFAULT_K (3).
+
+    Returns:
+        KnnReferenceResult. Always returns a result (never raises) —
+        the abstain path is a result with confidence=0, not an
+        exception.
+    """
+    if submitted_embedding is None:
+        return KnnReferenceResult(
+            score=0.5,
+            confidence=0.0,
+            mean_topk_distance=0.0,
+            n_references_used=0,
+            k=k,
+            abstain_reason="no_submitted_embedding",
+            manufacturer_profile="generic",
+            metadata={"reason": "no_submitted_embedding"},
+        )
+
+    if manufacturer is None or variant_id is None:
+        # No catalog match → no reference set to look up.
+        return KnnReferenceResult(
+            score=0.5,
+            confidence=0.0,
+            mean_topk_distance=0.0,
+            n_references_used=0,
+            k=k,
+            abstain_reason="insufficient_references",
+            manufacturer_profile="generic",
+            metadata={"reason": "unidentified", "n_references": 0, "k": k},
+        )
+
+    references = lookup_references(
+        Path(references_store_path), manufacturer, variant_id
+    )
+    return analyze_knn_reference(
+        np.asarray(submitted_embedding, dtype=np.float32),
+        np.asarray(references, dtype=np.float32) if references is not None else None,
+        k=k,
     )
 
 
@@ -421,6 +514,17 @@ def _verdict_from_typography(m: TypographyResult) -> AuthenticityVerdict:
     )
 
 
+def _verdict_from_knn_reference(m: KnnReferenceResult) -> AuthenticityVerdict:
+    """Same shape as the others against the k-NN-reference thresholds.
+    The detector self-abstains (UNVERIFIED) when no submitted embedding
+    is available, the card is unidentified, or fewer than k authentic
+    exemplars are on file for the variant — see `analyze_knn_reference_service`
+    for the abstain paths."""
+    return AuthenticityVerdict(
+        ensemble.verdict_from_knn_reference(m.score, m.confidence)
+    )
+
+
 def _verdict_from_holographic(m: HolographicResult) -> AuthenticityVerdict:
     """Same shape as the others against the holographic-parallax thresholds.
     The detector self-abstains (UNVERIFIED) when tilt_30 wasn't captured,
@@ -614,6 +718,59 @@ def _reasons_from_holographic(
     return reasons
 
 
+def _reasons_from_knn_reference(
+    m: KnnReferenceResult, verdict: AuthenticityVerdict
+) -> list[str]:
+    """Reasons formatter matching the embedding-anomaly shape — same
+    npz source, same forensic-tracing needs. The k-NN signal is reported
+    as 'mean cosine distance to top-k authentic exemplars' so reviewers
+    can immediately see this is the manifold-distance signal, not the
+    centroid one."""
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        why = m.abstain_reason or (
+            m.metadata.get("reason") if isinstance(m.metadata, dict) else None
+        )
+        if why == "no_submitted_embedding":
+            reasons.append(
+                "no submitted embedding available — k-NN reference signal "
+                "not collected"
+            )
+        elif why == "insufficient_references" or why == "unidentified":
+            reasons.append(
+                f"insufficient authentic exemplars for k-NN top-{m.k} "
+                f"(n_references={m.n_references_used}, need >= {m.k})"
+            )
+        else:
+            reasons.append(
+                f"insufficient k-NN reference confidence "
+                f"(confidence={m.confidence:.2f}, reason={why or 'unknown'})"
+            )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"submitted embedding consistent with top-{m.k} authentic "
+            f"exemplars (knn_score={m.score:.2f}, "
+            f"mean_topk_distance={m.mean_topk_distance:.3f}, "
+            f"n_refs={m.n_references_used})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"submitted embedding far from all authentic exemplars "
+            f"(knn_score={m.score:.2f}, "
+            f"mean_topk_distance={m.mean_topk_distance:.3f}, "
+            f"n_refs={m.n_references_used})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"borderline distance to nearest authentic exemplars "
+            f"(knn_score={m.score:.2f}, "
+            f"mean_topk_distance={m.mean_topk_distance:.3f}, "
+            f"n_refs={m.n_references_used})"
+        )
+    return reasons
+
+
 def _reasons_from_rosette(
     m: RosetteMeasurement, verdict: AuthenticityVerdict
 ) -> list[str]:
@@ -666,6 +823,24 @@ def _holographic_no_signal(reason: str = "tilt_not_captured") -> HolographicResu
     )
 
 
+def _knn_reference_no_signal(
+    reason: str = "no_submitted_embedding",
+) -> KnnReferenceResult:
+    """Default-shaped abstaining KnnReferenceResult for callers that
+    don't have a real measurement to pass in (legacy callers, tests).
+    Mapped to UNVERIFIED by the verdict mapper."""
+    return KnnReferenceResult(
+        score=0.5,
+        confidence=0.0,
+        mean_topk_distance=0.0,
+        n_references_used=0,
+        k=KNN_REFERENCE_DEFAULT_K,
+        abstain_reason=reason,
+        manufacturer_profile="generic",
+        metadata={"reason": reason},
+    )
+
+
 def _typography_no_signal(reason: str = "no_expected_text") -> TypographyResult:
     """Default-shaped abstaining TypographyResult for callers that don't
     have a real measurement to pass in (legacy callers, tests). Mapped
@@ -691,6 +866,7 @@ async def persist_authenticity_result(
     db: AsyncSession,
     typography: TypographyResult | None = None,
     holographic: HolographicResult | None = None,
+    knn_reference: KnnReferenceResult | None = None,
 ) -> AuthenticityResult:
     """Insert or update the AuthenticityResult row for a submission.
 
@@ -719,11 +895,14 @@ async def persist_authenticity_result(
         typography = _typography_no_signal()
     if holographic is None:
         holographic = _holographic_no_signal()
+    if knn_reference is None:
+        knn_reference = _knn_reference_no_signal()
     rosette_verdict = _verdict_from_rosette(rosette)
     color_verdict = _verdict_from_color_profile(color)
     embedding_verdict = _verdict_from_embedding_anomaly(embedding)
     typography_verdict = _verdict_from_typography(typography)
     holographic_verdict = _verdict_from_holographic(holographic)
+    knn_reference_verdict = _verdict_from_knn_reference(knn_reference)
     verdict = _combine_verdicts(
         [
             rosette_verdict,
@@ -731,6 +910,7 @@ async def persist_authenticity_result(
             embedding_verdict,
             typography_verdict,
             holographic_verdict,
+            knn_reference_verdict,
         ]
     )
 
@@ -797,6 +977,16 @@ async def persist_authenticity_result(
             "verdict": holographic_verdict.value,
             "abstain_reason": holographic.abstain_reason,
         },
+        "knn_reference": {
+            "score": float(knn_reference.score),
+            "confidence": float(knn_reference.confidence),
+            "mean_topk_distance": float(knn_reference.mean_topk_distance),
+            "n_references_used": int(knn_reference.n_references_used),
+            "k": int(knn_reference.k),
+            "manufacturer_profile": knn_reference.manufacturer_profile,
+            "verdict": knn_reference_verdict.value,
+            "abstain_reason": knn_reference.abstain_reason,
+        },
     }
     reasons: list[str] = []
     reasons.extend(_reasons_from_rosette(rosette, rosette_verdict))
@@ -804,6 +994,7 @@ async def persist_authenticity_result(
     reasons.extend(_reasons_from_embedding_anomaly(embedding, embedding_verdict))
     reasons.extend(_reasons_from_typography(typography, typography_verdict))
     reasons.extend(_reasons_from_holographic(holographic, holographic_verdict))
+    reasons.extend(_reasons_from_knn_reference(knn_reference, knn_reference_verdict))
 
     model_versions = {
         "rosette": ROSETTE_MODEL_VERSION,
@@ -811,6 +1002,7 @@ async def persist_authenticity_result(
         "embedding_anomaly": EMBEDDING_MODEL_VERSION,
         "typography": TYPOGRAPHY_MODEL_VERSION,
         "holographic": HOLOGRAPHIC_MODEL_VERSION,
+        "knn_reference": KNN_REFERENCE_MODEL_VERSION,
         "thresholds": {
             "rosette_authentic": ROSETTE_AUTHENTIC_THRESHOLD,
             "rosette_counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
@@ -827,6 +1019,9 @@ async def persist_authenticity_result(
             "holographic_authentic": HOLOGRAPHIC_AUTHENTIC_THRESHOLD,
             "holographic_counterfeit": HOLOGRAPHIC_COUNTERFEIT_THRESHOLD,
             "holographic_min_confidence": HOLOGRAPHIC_MIN_CONFIDENCE,
+            "knn_reference_authentic": KNN_REFERENCE_AUTHENTIC_THRESHOLD,
+            "knn_reference_counterfeit": KNN_REFERENCE_COUNTERFEIT_THRESHOLD,
+            "knn_reference_min_confidence": KNN_REFERENCE_MIN_CONFIDENCE,
         },
     }
 
@@ -847,6 +1042,8 @@ async def persist_authenticity_result(
         confident.append(float(typography.confidence))
     if holographic.confidence >= HOLOGRAPHIC_MIN_CONFIDENCE:
         confident.append(float(holographic.confidence))
+    if knn_reference.confidence >= KNN_REFERENCE_MIN_CONFIDENCE:
+        confident.append(float(knn_reference.confidence))
     combined_confidence = min(confident) if confident else 0.0
 
     existing = await db.scalar(

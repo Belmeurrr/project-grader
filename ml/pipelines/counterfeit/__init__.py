@@ -10,6 +10,10 @@ from pipelines.counterfeit.holographic import (
     HolographicResult,
     analyze_holographic_parallax,
 )
+from pipelines.counterfeit.knn_reference import (
+    KnnReferenceResult,
+    analyze_knn_reference,
+)
 from pipelines.counterfeit.rosette import (
     DEFAULT_FREQ_BAND,
     DEFAULT_INNER_INSET_PX,
@@ -41,4 +45,7 @@ __all__ = [
     # Embedding anomaly (cosine distance from authentic centroid) — #7
     "EmbeddingAnomalyMeasurement",
     "measure_embedding_anomaly",
+    # k-NN reference (mean cosine distance to top-k authentic exemplars) — #1
+    "KnnReferenceResult",
+    "analyze_knn_reference",
 ]

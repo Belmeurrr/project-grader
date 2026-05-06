@@ -23,6 +23,7 @@ from typing import Iterable
 from pipelines.counterfeit.color import ColorProfileMeasurement
 from pipelines.counterfeit.embedding_anomaly import EmbeddingAnomalyMeasurement
 from pipelines.counterfeit.holographic import HolographicResult
+from pipelines.counterfeit.knn_reference import KnnReferenceResult
 from pipelines.counterfeit.rosette import RosetteMeasurement
 from pipelines.counterfeit.typography import TypographyResult
 
@@ -108,6 +109,23 @@ HOLOGRAPHIC_MIN_CONFIDENCE: float = 0.4
 HOLOGRAPHIC_MODEL_VERSION: str = "parallax-flow-v1"
 
 
+# k-NN reference detector. Score is a logistic of the MEAN cosine
+# distance from the submitted embedding to the top-k nearest authentic
+# reference embeddings (k=3 by default). Distinct from embedding-anomaly
+# (#7), which collapses references to a centroid: real authentic
+# exemplars cluster on a manifold, and a submission can be far from the
+# centroid but near multiple specific exemplars (and vice versa). The
+# k-NN reduction catches the manifold case the centroid misses. The
+# detector self-abstains when (a) no submitted embedding is available
+# (identification short-circuited) or (b) fewer than k authentic
+# exemplars are on file for the variant. Synthetic placeholders —
+# recalibration tool ratchets them later.
+KNN_REFERENCE_AUTHENTIC_THRESHOLD: float = 0.65
+KNN_REFERENCE_COUNTERFEIT_THRESHOLD: float = 0.35
+KNN_REFERENCE_MIN_CONFIDENCE: float = 0.4
+KNN_REFERENCE_MODEL_VERSION: str = "knn-topk-v1"
+
+
 # --------------------------------------------------------------------------
 # Per-detector verdict mappers
 # --------------------------------------------------------------------------
@@ -182,6 +200,28 @@ def verdict_from_holographic(score: float, confidence: float) -> str:
     if score >= HOLOGRAPHIC_AUTHENTIC_THRESHOLD:
         return VERDICT_AUTHENTIC
     if score < HOLOGRAPHIC_COUNTERFEIT_THRESHOLD:
+        return VERDICT_LIKELY_COUNTERFEIT
+    return VERDICT_SUSPICIOUS
+
+
+def verdict_from_knn_reference(score: float, confidence: float) -> str:
+    """Tri-state verdict for the k-NN reference detector.
+
+    UNVERIFIED when the detector abstained (no submitted embedding from
+    identification, or fewer than k authentic exemplars on file for the
+    variant) — encoded as confidence < KNN_REFERENCE_MIN_CONFIDENCE.
+    Above the AUTHENTIC threshold → AUTHENTIC. Below the COUNTERFEIT
+    threshold → LIKELY_COUNTERFEIT. Between → SUSPICIOUS.
+
+    Takes (score, confidence) directly rather than a KnnReferenceResult
+    so the benchmark and the apps/api wrapper can call this with the
+    same signature shape that the recalibration tool consumes — same
+    contract as `verdict_from_typography` and `verdict_from_holographic`."""
+    if confidence < KNN_REFERENCE_MIN_CONFIDENCE:
+        return VERDICT_UNVERIFIED
+    if score >= KNN_REFERENCE_AUTHENTIC_THRESHOLD:
+        return VERDICT_AUTHENTIC
+    if score < KNN_REFERENCE_COUNTERFEIT_THRESHOLD:
         return VERDICT_LIKELY_COUNTERFEIT
     return VERDICT_SUSPICIOUS
 
@@ -268,11 +308,16 @@ __all__ = [
     "HOLOGRAPHIC_COUNTERFEIT_THRESHOLD",
     "HOLOGRAPHIC_MIN_CONFIDENCE",
     "HOLOGRAPHIC_MODEL_VERSION",
+    "KNN_REFERENCE_AUTHENTIC_THRESHOLD",
+    "KNN_REFERENCE_COUNTERFEIT_THRESHOLD",
+    "KNN_REFERENCE_MIN_CONFIDENCE",
+    "KNN_REFERENCE_MODEL_VERSION",
     # Logic
     "verdict_from_rosette",
     "verdict_from_color_profile",
     "verdict_from_embedding_anomaly",
     "verdict_from_typography",
     "verdict_from_holographic",
+    "verdict_from_knn_reference",
     "combine_verdicts",
 ]
