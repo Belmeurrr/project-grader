@@ -11,7 +11,7 @@
  * codegen once we add it.
  */
 
-export type GradingScheme = "psa" | "bgs" | "sgc" | "cgc";
+export type GradingScheme = "psa" | "bgs" | "trugrade";
 
 export type AuthenticityVerdict =
   | "authentic"

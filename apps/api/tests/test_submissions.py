@@ -11,6 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from grader.db.models import (
+    AuthenticityResult,
+    AuthenticityVerdict,
     CardSet,
     CardVariant,
     Game,
@@ -177,3 +179,97 @@ async def test_get_submission_omits_identified_card_when_not_identified(
     r = await client.get(f"/submissions/{sid}", headers=auth_headers)
     assert r.status_code == 200
     assert r.json()["identified_card"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_submission_with_nested_authenticity_does_not_500(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+) -> None:
+    """Regression for the AuthenticityOut.detector_scores schema-drift
+    bug: the persisted shape under `AuthenticityResult.detector_scores`
+    is `{<detector>: {<metric>: <value>}}` (nested dicts, not flat
+    floats). Pydantic v2 was rejecting this against the old
+    `dict[str, float]` annotation, which 500'd `GET /submissions/{id}`
+    for any submission that had run through the counterfeit pipeline.
+
+    The fix relaxed the annotation to `dict[str, dict[str, Any]]`. This
+    test exercises `_to_out` end-to-end with the exact nested shape
+    `persist_authenticity_result` writes and asserts the round-trip
+    preserves it (no flattening, no validation error)."""
+    created = (await client.post("/submissions", headers=auth_headers, json={})).json()
+    sid = uuid.UUID(created["id"])
+
+    nested_scores = {
+        "rosette": {
+            "score": 0.92,
+            "peak_strength": 0.41,
+            "analyzed_patches": 4,
+            "confidence": 0.85,
+            "manufacturer_profile": "pokemon_modern",
+            "verdict": "authentic",
+        },
+        "color": {
+            "score": 0.88,
+            "p95_chroma": 12.5,
+            "border_white_bgr": [240.0, 241.0, 242.0],
+            "border_stddev": 1.2,
+            "gain_applied": [1.0, 1.0, 1.0],
+            "confidence": 0.8,
+            "manufacturer_profile": "pokemon_modern",
+            "verdict": "authentic",
+        },
+        "embedding_anomaly": {
+            "score": 0.0,
+            "distance_from_centroid": None,
+            "n_references": 0,
+            "confidence": 0.0,
+            "manufacturer_profile": None,
+            "verdict": "unverified",
+            "abstain_reason": "no_references",
+        },
+        "typography": {
+            "score": 0.95,
+            "confidence": 0.9,
+            "extracted_text": "PIKACHU V",
+            "expected_text": "PIKACHU V",
+            "levenshtein_distance": 0,
+            "manufacturer_profile": "pokemon_modern",
+            "verdict": "authentic",
+            "abstain_reason": None,
+        },
+        "holographic": {
+            "score": 0.0,
+            "confidence": 0.0,
+            "flow_ratio": None,
+            "holo_mask_fraction": None,
+            "manufacturer_profile": None,
+            "verdict": "unverified",
+            "abstain_reason": "no_tilt_shot",
+        },
+    }
+
+    db_session.add(
+        AuthenticityResult(
+            submission_id=sid,
+            verdict=AuthenticityVerdict.AUTHENTIC,
+            confidence=0.8,
+            detector_scores=nested_scores,
+            reasons=["rosette_authentic", "color_authentic"],
+            model_versions={"rosette": "v1", "color": "v1"},
+        )
+    )
+    await db_session.flush()
+
+    r = await client.get(f"/submissions/{sid}", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["authenticity"] is not None
+    out_scores = body["authenticity"]["detector_scores"]
+    # Nested shape preserved verbatim — no flattening, no coercion.
+    assert isinstance(out_scores["rosette"], dict)
+    assert out_scores["rosette"]["score"] == 0.92
+    assert out_scores["rosette"]["verdict"] == "authentic"
+    assert out_scores["embedding_anomaly"]["abstain_reason"] == "no_references"
+    assert set(out_scores.keys()) == set(nested_scores.keys())

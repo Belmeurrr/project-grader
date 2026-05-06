@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,7 +86,12 @@ class AuthenticityOut(BaseModel):
     verdict: AuthenticityVerdict
     confidence: float
     reasons: list[str]
-    detector_scores: dict[str, float]
+    # The persisted shape under `AuthenticityResult.detector_scores` is
+    # `{<detector>: {<metric>: <value>, ...}}` — see
+    # `services/counterfeit.py::persist_authenticity_result`. The owner-
+    # side response surfaces it verbatim; the public cert page uses the
+    # richer `CertAuthenticityPublic` instead.
+    detector_scores: dict[str, dict[str, Any]]
 
 
 class IdentifiedCard(BaseModel):
@@ -130,9 +136,9 @@ class DetectorScorePublic(BaseModel):
 class CertAuthenticityPublic(BaseModel):
     """Public-cert view of the AuthenticityResult row.
 
-    Distinct from `AuthenticityOut` (which carries the legacy flat
-    `dict[str, float]` for detector_scores). This shape exposes the
-    per-detector breakdown the cert page renders."""
+    Distinct from `AuthenticityOut` (which surfaces the raw nested
+    `detector_scores` blob verbatim). This shape exposes the per-
+    detector breakdown the cert page renders."""
 
     verdict: AuthenticityVerdict
     confidence: float

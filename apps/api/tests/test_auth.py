@@ -200,7 +200,7 @@ async def test_prod_mode_valid_jwt_authenticates(
         kid=kid,
         issuer=prod_settings.clerk_issuer,
         sub="user_abc123",
-        extra={"email": "real@user.example"},
+        extra={"email": "real@user.example", "email_verified": True},
     )
     fetch = AsyncMock(return_value=_jwks_response(public_pem, kid))
     with _patch_jwks_cache_fetch(fetch):
@@ -229,6 +229,7 @@ async def test_prod_mode_email_falls_back_to_placeholder(
         kid=kid,
         issuer=prod_settings.clerk_issuer,
         sub="user_no_email",
+        extra={"email_verified": True},
     )
     fetch = AsyncMock(return_value=_jwks_response(public_pem, kid))
     with _patch_jwks_cache_fetch(fetch):
@@ -262,7 +263,7 @@ async def test_prod_mode_existing_user_is_reused(
         kid=kid,
         issuer=prod_settings.clerk_issuer,
         sub="user_already_here",
-        extra={"email": "different@example.com"},
+        extra={"email": "different@example.com", "email_verified": True},
     )
     fetch = AsyncMock(return_value=_jwks_response(public_pem, kid))
     with _patch_jwks_cache_fetch(fetch):
@@ -434,6 +435,7 @@ async def test_jwks_cache_reuses_within_ttl(
                 kid=kid,
                 issuer=prod_settings.clerk_issuer,
                 sub=f"user_{uuid.uuid4().hex[:6]}",
+                extra={"email_verified": True},
             )
             r = await client.post(
                 "/submissions",
@@ -510,3 +512,101 @@ def test_dev_auth_explicit_override_wins(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("DEV_AUTH_ENABLED", "true")
     get_settings.cache_clear()
     assert get_settings().dev_auth_enabled is True
+
+
+# --------------------------------------------------------------------------
+# email_verified gate (Clerk mode only)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prod_mode_unverified_email_is_rejected(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    prod_settings: Any,
+) -> None:
+    """A JWT with email_verified=False must NOT auto-create a user and
+    must return 401 with detail=email_not_verified. Closes the gap that
+    let attackers spin up a free Clerk org and submit jobs."""
+    private, public_pem = _make_rsa_keypair()
+    kid = "test-kid-unverified"
+    token = _sign_jwt(
+        private,
+        kid=kid,
+        issuer=prod_settings.clerk_issuer,
+        sub="user_unverified",
+        extra={"email": "attacker@evil.example", "email_verified": False},
+    )
+    fetch = AsyncMock(return_value=_jwks_response(public_pem, kid))
+    with _patch_jwks_cache_fetch(fetch):
+        r = await client.post(
+            "/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+    assert r.status_code == 401
+    assert r.json()["detail"] == "email_not_verified"
+
+    # Critically: the User row must NOT have been created.
+    rows = await db_session.execute(
+        select(User).where(User.clerk_id == "user_unverified")
+    )
+    assert rows.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_prod_mode_missing_email_verified_claim_is_rejected(
+    client: httpx.AsyncClient, prod_settings: Any
+) -> None:
+    """Absence of email_verified in claims is treated the same as False:
+    we never trust an account whose verification status we can't see."""
+    private, public_pem = _make_rsa_keypair()
+    kid = "test-kid-missing-verified"
+    token = _sign_jwt(
+        private,
+        kid=kid,
+        issuer=prod_settings.clerk_issuer,
+        sub="user_missing_verified",
+        extra={"email": "x@y.example"},
+    )
+    fetch = AsyncMock(return_value=_jwks_response(public_pem, kid))
+    with _patch_jwks_cache_fetch(fetch):
+        r = await client.post(
+            "/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+    assert r.status_code == 401
+    assert r.json()["detail"] == "email_not_verified"
+
+
+@pytest.mark.asyncio
+async def test_prod_mode_verified_email_passes(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    prod_settings: Any,
+) -> None:
+    """Symmetric positive case: email_verified=True accepts the JWT and
+    creates the user row."""
+    private, public_pem = _make_rsa_keypair()
+    kid = "test-kid-verified"
+    token = _sign_jwt(
+        private,
+        kid=kid,
+        issuer=prod_settings.clerk_issuer,
+        sub="user_verified",
+        extra={"email": "real@user.example", "email_verified": True},
+    )
+    fetch = AsyncMock(return_value=_jwks_response(public_pem, kid))
+    with _patch_jwks_cache_fetch(fetch):
+        r = await client.post(
+            "/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+    assert r.status_code == 201, r.text
+    rows = await db_session.execute(
+        select(User).where(User.clerk_id == "user_verified")
+    )
+    user = rows.scalar_one()
+    assert user.email == "real@user.example"

@@ -279,6 +279,15 @@ async def _authenticate_clerk(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="jwt missing sub",
         )
+    # Block self-issued / unverified Clerk accounts: a user that hasn't
+    # confirmed their email never gets a User row, never auto-creates,
+    # and can't submit jobs. The dev path (_authenticate_dev) is
+    # intentionally exempt — it's gated behind dev_auth_enabled.
+    if claims.get("email_verified") is not True:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="email_not_verified",
+        )
     email = claims.get("email") or f"{sub}@user.clerk"
     return await _get_or_create_user(db, clerk_id=sub, email=email)
 
