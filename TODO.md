@@ -8,7 +8,7 @@ Each item has enough context to pick it up cold without reloading session state.
 
 ## Status snapshot (2026-05-04, late session)
 
-Counterfeit ensemble is now **6/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly + typography + holographic-parallax + k-NN top-3 reference). Production-readiness landed: orphan reconciler beat, 25 MiB upload cap, slowapi rate limits, Sentry + p95-able HTTP timer + per-stage pipeline logs, `email_verified` Clerk claim gate, MissingGreenlet test-fixture bug fixed. Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). Daily data flywheel is a **4-step** launchd chain (ingest → re-embed references → accumulate exemplars → catalog DB-side sync). All four ML-head trainer skeletons committed; identification trainer just got supervised metric learning unblocked (no new data needed). Public cert page now renders Phase-1 partial-grade certs without crashing (was a P0). Submit endpoint surfaces broker outages instead of stranding. Web frontend wired to real Clerk JWTs (with dev-mode fallback for tests). Capture wizard now offers optional flash + tilt shots so future detectors get archived data immediately. apps/api → ml/ imports go through a proper editable install (no more `parents[4]` footgun). Counterfeit-threshold recalibration tool covers all 4 detectors. The system is ~35% to production MVP; ML heads stay data-blocked on PSA corpus growth + counterfeit-slice sourcing.
+Counterfeit ensemble is now **7/7 wired** end-to-end (FFT rosette + color profile + embedding-anomaly + typography + holographic-parallax + k-NN top-3 reference + substrate). Production-readiness landed: orphan reconciler beat, 25 MiB upload cap, slowapi rate limits, Sentry + p95-able HTTP timer + per-stage pipeline logs, `email_verified` Clerk claim gate, MissingGreenlet test-fixture bug fixed, damage-heatmap on cert page, GitHub Actions CI + `requires_postgres` marker, JSONB schema-parity test, web Vitest smoke, hypothesis property tests. Manufacturer reference flywheel is live for MTG (Scryfall paginated + bulk) and Pokemon (PokemonTCG.io). Daily data flywheel is a **4-step** launchd chain (ingest → re-embed references → accumulate exemplars → catalog DB-side sync). All four ML-head trainer skeletons committed; identification trainer just got supervised metric learning unblocked (no new data needed). Public cert page now renders Phase-1 partial-grade certs without crashing (was a P0). Submit endpoint surfaces broker outages instead of stranding. Web frontend wired to real Clerk JWTs (with dev-mode fallback for tests). Capture wizard now offers optional flash + tilt shots so future detectors get archived data immediately. apps/api → ml/ imports go through a proper editable install (no more `parents[4]` footgun). Counterfeit-threshold recalibration tool covers all 4 detectors. The system is ~35% to production MVP; ML heads stay data-blocked on PSA corpus growth + counterfeit-slice sourcing.
 
 ### What's shipped (production-ready)
 
@@ -35,7 +35,7 @@ Counterfeit ensemble is now **6/7 wired** end-to-end (FFT rosette + color profil
 
 | Component | State | Notes |
 |---|---|---|
-| Counterfeit ensemble | ⚠️ MVP (6/7) | Rosette + color + embedding (centroid) + typography + holographic + k-NN top-3 wired |
+| Counterfeit ensemble | ✅ MVP (7/7) | Rosette + color + embedding-centroid + typography + holographic + k-NN top-3 + substrate all wired |
 | Web UI | ⚠️ MVP | No design polish; no Clerk integration |
 | Corners trainer | ⚠️ Skeleton | Refuses to train < 200 samples |
 | Surface trainer | ⚠️ Skeleton | Default mask loader returns background |
@@ -48,7 +48,6 @@ Counterfeit ensemble is now **6/7 wired** end-to-end (FFT rosette + color profil
 | Feature | Gap | Impact |
 |---|---|---|
 | Corners + surface grading models | Real training data | Pipeline returns NULL grades |
-| Substrate / paper detector (#6) | Flash-shot labeled dataset | Out of 7-detector ensemble |
 | Stripe payments | Integration not wired | Blocks paid-tier feature |
 | TCGplayer pricing comps | Integration not wired | No EV calculations |
 | Clerk JWT swap (web) | ✅ wired (commit c37cf03); flip API `dev_auth_enabled=false` in prod env | (no longer dev-only) |
@@ -127,7 +126,6 @@ Counterfeit ensemble is now **6/7 wired** end-to-end (FFT rosette + color profil
 ## Blocked on other work
 
 - [ ] **Typography counterfeit detector** (ensemble #5) — needs PaddleOCR or similar (new dep). OCR + glyph-shape comparison to canonical font templates.
-- [ ] **Substrate paper detector** (ensemble #6) — manufacturer reference library now exists, but per-manufacturer paper-fluorescence training still needs a labeled flash-shot dataset (which we don't have). Distinct from embedding-anomaly: substrate looks at the *paper itself* under flash, not at art content.
 - [ ] **Siamese reference detector** (ensemble #1) — would be trained off the same data feeding the DinoV2 trainer skeleton; effectively the same fine-tune with a different head. Consider folding into the identification trainer rather than building a separate one.
 
 ---
@@ -192,6 +190,10 @@ Flash-shot dataset + substrate detector (4-6 weeks, hardware-dependent)
 ---
 
 ## Recently shipped
+
+### 2026-05-06
+- **Substrate / paper-fluorescence counterfeit detector (#6 of 7)** (`feat: substrate / paper-fluorescence detector — 7/7 ensemble milestone`, 4cfe455). **Counterfeit ensemble now 7/7 wired.** New `ml/pipelines/counterfeit/substrate/`. Algorithm: paired-flash differential b\* on the white-border ROI (outer 4% ring, corners excluded). Exposure-normalize by matching median L\* between flash and no-flash, then `delta_b = median(b*_flash[border]) - median(b*_no_flash[border])`. Logistic squash midpoint=-3, slope=0.4 (deliberately gentle — phone flash is UV-poor). Full confidence at MAD<1.0, ramps to 0.4 at MAD≥3.0, **hard cap at 0.7** to reflect the algorithmic ceiling vs UV-lamp ground truth. Five abstain reasons (`flash_not_captured`, `shape_mismatch`, `invalid_image`, `border_too_small`, exception swallow). FRONT_FULL_FLASH added to OPTIONAL_SHOTS so dewarp soft-fails on it. Wired through ensemble.py + recalibration tool + pipeline_runner stage 3.5 + `detector_scores["substrate"]` persistence + audit log fields. 15 detector + 5 service + 1 pipeline tests, 471 ml total. Documented limits: phone flash UV-poor; ceiling ~60-75% on cheap fakes; useless on super-fakes printed on brightener-free offset stock; foil-exclusion gate is out of scope (no foil detector exists yet).
+- **Audit cleanup bundle** (`chore: address four small audit findings deferred from earlier planning`, d3ed0ec). Four small fixes in one commit. (a) Deleted duplicated `load_canonical_bgr` in `services/identification.py`; consumer now uses the canonical `storage.load_canonical_bgr`. (b) `services/detection.py` no longer parses S3 keys via `split("/")[1]` index — uses regex `^submissions/(?P<id>[0-9a-f-]{36})/` with explicit failure mode. (c) Shot-kind spoofing closed: `register_shot` now requires `kind` in the request body and validates it matches the kind segment in the s3_key; clients can no longer mix shot_id from one presign with s3_key from another. (d) `presigned_post_for_shot` wraps `(ClientError, BotoCoreError)`, logs structured detail, re-raises as typed `StoragePresignError`; route handler maps to 503 with `{reason: storage_unavailable, retry_after: 30}` matching the broker-failure shape.
 
 ### 2026-05-05 (late session — 5-commit production-hardening batch)
 - **k-NN top-3 reference counterfeit detector (#1 of 7)** (`feat: k-NN top-3 reference counterfeit detector — 6/7 ensemble milestone`, 80a43de). Replaces the planned siamese-network detector with mean cosine distance to top-3 nearest authentic exemplars (vs. centroid distance for #7). Catches the manifold case centroid distance misses — authentic exemplars cluster on a manifold (different angles/lighting), submissions on the manifold but far from centroid score "anomalous" today; submissions inside centroid radius but far from any actual exemplar score "fine" today. New module `ml/pipelines/counterfeit/knn_reference/`. Logistic squash midpoint=0.25, slope=15.0; abstain UNVERIFIED below `n=3` references. Wired through ensemble.py (KNN_REFERENCE_AUTHENTIC=0.65, COUNTERFEIT=0.35, MIN_CONFIDENCE=0.4 placeholders), recalibration coverage, pipeline_runner stage 3.5, persisted under `detector_scores["knn_reference"]`. 23 detector tests + 6 service + 1 pipeline. **Counterfeit ensemble now 6/7 wired** — only substrate (#6) remains, and that's data-blocked.
