@@ -82,6 +82,10 @@ CURRENT_THRESHOLDS: dict[str, tuple[float, float]] = {
         ensemble.KNN_REFERENCE_AUTHENTIC_THRESHOLD,
         ensemble.KNN_REFERENCE_COUNTERFEIT_THRESHOLD,
     ),
+    "substrate": (
+        ensemble.SUBSTRATE_AUTHENTIC_THRESHOLD,
+        ensemble.SUBSTRATE_COUNTERFEIT_THRESHOLD,
+    ),
 }
 
 

@@ -25,6 +25,7 @@ from pipelines.counterfeit.embedding_anomaly import EmbeddingAnomalyMeasurement
 from pipelines.counterfeit.holographic import HolographicResult
 from pipelines.counterfeit.knn_reference import KnnReferenceResult
 from pipelines.counterfeit.rosette import RosetteMeasurement
+from pipelines.counterfeit.substrate import SubstrateResult
 from pipelines.counterfeit.typography import TypographyResult
 
 
@@ -124,6 +125,22 @@ KNN_REFERENCE_AUTHENTIC_THRESHOLD: float = 0.65
 KNN_REFERENCE_COUNTERFEIT_THRESHOLD: float = 0.35
 KNN_REFERENCE_MIN_CONFIDENCE: float = 0.4
 KNN_REFERENCE_MODEL_VERSION: str = "knn-topk-v1"
+
+
+# Substrate / paper-fluorescence detector. Score is a logistic of the
+# paired-flash differential CIELAB b* on the unprinted white border.
+# Counterfeits printed on inkjet/photo paper with optical brighteners
+# show a strong NEGATIVE delta_b (more blue under flash) — authentic
+# offset stock has minimal brighteners and stays near 0. The detector
+# self-abstains when (a) the optional flash shot wasn't captured,
+# (b) front and flash canonicals have mismatched shapes, (c) either
+# image is invalid, or (d) the border ROI has too few pixels for a
+# stable median+MAD. First-pass heuristic — no labeled corpus required.
+# Synthetic placeholders — recalibration tool ratchets them later.
+SUBSTRATE_AUTHENTIC_THRESHOLD: float = 0.65
+SUBSTRATE_COUNTERFEIT_THRESHOLD: float = 0.35
+SUBSTRATE_MIN_CONFIDENCE: float = 0.4
+SUBSTRATE_MODEL_VERSION: str = "delta-b-flash-v1"
 
 
 # --------------------------------------------------------------------------
@@ -226,6 +243,29 @@ def verdict_from_knn_reference(score: float, confidence: float) -> str:
     return VERDICT_SUSPICIOUS
 
 
+def verdict_from_substrate(score: float, confidence: float) -> str:
+    """Tri-state verdict for the substrate / paper-fluorescence detector.
+
+    UNVERIFIED when the detector abstained (flash shot missing, image
+    shape mismatch, invalid input, border too small) — encoded as
+    confidence < SUBSTRATE_MIN_CONFIDENCE. Above the AUTHENTIC threshold
+    → AUTHENTIC. Below the COUNTERFEIT threshold → LIKELY_COUNTERFEIT.
+    Between → SUSPICIOUS.
+
+    Takes (score, confidence) directly rather than a SubstrateResult so
+    the benchmark and the apps/api wrapper can call this with the same
+    signature shape that the recalibration tool consumes — same contract
+    as `verdict_from_typography`, `verdict_from_holographic`, and
+    `verdict_from_knn_reference`."""
+    if confidence < SUBSTRATE_MIN_CONFIDENCE:
+        return VERDICT_UNVERIFIED
+    if score >= SUBSTRATE_AUTHENTIC_THRESHOLD:
+        return VERDICT_AUTHENTIC
+    if score < SUBSTRATE_COUNTERFEIT_THRESHOLD:
+        return VERDICT_LIKELY_COUNTERFEIT
+    return VERDICT_SUSPICIOUS
+
+
 def verdict_from_embedding_anomaly(m: EmbeddingAnomalyMeasurement) -> str:
     """Tri-state verdict for the embedding-anomaly detector.
 
@@ -312,6 +352,10 @@ __all__ = [
     "KNN_REFERENCE_COUNTERFEIT_THRESHOLD",
     "KNN_REFERENCE_MIN_CONFIDENCE",
     "KNN_REFERENCE_MODEL_VERSION",
+    "SUBSTRATE_AUTHENTIC_THRESHOLD",
+    "SUBSTRATE_COUNTERFEIT_THRESHOLD",
+    "SUBSTRATE_MIN_CONFIDENCE",
+    "SUBSTRATE_MODEL_VERSION",
     # Logic
     "verdict_from_rosette",
     "verdict_from_color_profile",
@@ -319,5 +363,6 @@ __all__ = [
     "verdict_from_typography",
     "verdict_from_holographic",
     "verdict_from_knn_reference",
+    "verdict_from_substrate",
     "combine_verdicts",
 ]

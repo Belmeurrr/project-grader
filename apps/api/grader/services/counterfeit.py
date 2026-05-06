@@ -49,6 +49,10 @@ from pipelines.counterfeit.rosette import (
     RosetteMeasurement,
     measure_rosette,
 )
+from pipelines.counterfeit.substrate import (
+    SubstrateResult,
+    analyze_substrate,
+)
 from pipelines.counterfeit.typography import (
     TypographyResult,
     analyze_typography,
@@ -82,6 +86,10 @@ KNN_REFERENCE_AUTHENTIC_THRESHOLD = ensemble.KNN_REFERENCE_AUTHENTIC_THRESHOLD
 KNN_REFERENCE_COUNTERFEIT_THRESHOLD = ensemble.KNN_REFERENCE_COUNTERFEIT_THRESHOLD
 KNN_REFERENCE_MIN_CONFIDENCE = ensemble.KNN_REFERENCE_MIN_CONFIDENCE
 KNN_REFERENCE_MODEL_VERSION = ensemble.KNN_REFERENCE_MODEL_VERSION
+SUBSTRATE_AUTHENTIC_THRESHOLD = ensemble.SUBSTRATE_AUTHENTIC_THRESHOLD
+SUBSTRATE_COUNTERFEIT_THRESHOLD = ensemble.SUBSTRATE_COUNTERFEIT_THRESHOLD
+SUBSTRATE_MIN_CONFIDENCE = ensemble.SUBSTRATE_MIN_CONFIDENCE
+SUBSTRATE_MODEL_VERSION = ensemble.SUBSTRATE_MODEL_VERSION
 
 
 class CounterfeitFailedError(Exception):
@@ -480,6 +488,102 @@ def analyze_holographic_service(
         )
 
 
+def analyze_substrate_service(
+    canonical_front_s3_key: str,
+    canonical_flash_s3_key: str | None,
+) -> SubstrateResult:
+    """Run the substrate / paper-fluorescence (paired-flash differential b*)
+    detector.
+
+    Same envelope as the holographic service wrapper: never raises.
+    Every failure mode resolves to a confidence-0 abstain so the
+    counterfeit ensemble can degrade gracefully rather than blow up
+    the whole stage.
+
+    Abstain paths:
+      - `canonical_flash_s3_key is None`: front_full_flash wasn't
+        captured. The wizard step is OPTIONAL, so this is the common
+        case for users who skipped the flash shot — UNVERIFIED with
+        abstain_reason='flash_not_captured' is correct.
+      - Front canonical fails to load: UNVERIFIED with
+        abstain_reason='invalid_image'.
+      - Flash canonical fails to load: UNVERIFIED with
+        abstain_reason='invalid_image' (we don't try to fall back to
+        front-only — the differential signal requires both shots).
+      - The detector itself abstains (shape mismatch, border too
+        small, invalid arrays) — those reasons are propagated through.
+
+    Args:
+        canonical_front_s3_key: S3 key of the dewarped 750x1050 front
+            canonical (BGR PNG) — the ambient-lit shot.
+        canonical_flash_s3_key: S3 key of the dewarped 750x1050
+            front_full_flash canonical (BGR PNG), or None if not
+            captured.
+
+    Returns:
+        SubstrateResult. Always populated; abstain encoded as
+        confidence=0 with `abstain_reason` set.
+    """
+    if canonical_flash_s3_key is None:
+        return SubstrateResult(
+            score=0.5,
+            confidence=0.0,
+            delta_b=None,
+            border_mad=None,
+            n_border_pixels=0,
+            abstain_reason="flash_not_captured",
+            manufacturer_profile="generic",
+            metadata={"reason": "flash_not_captured"},
+        )
+    try:
+        front = _load_canonical_bgr(canonical_front_s3_key)
+    except CounterfeitFailedError as e:
+        return SubstrateResult(
+            score=0.5,
+            confidence=0.0,
+            delta_b=None,
+            border_mad=None,
+            n_border_pixels=0,
+            abstain_reason="invalid_image",
+            manufacturer_profile="generic",
+            metadata={
+                "reason": "load_failed",
+                "which": "front",
+                "error": str(e),
+            },
+        )
+    try:
+        flash = _load_canonical_bgr(canonical_flash_s3_key)
+    except CounterfeitFailedError as e:
+        return SubstrateResult(
+            score=0.5,
+            confidence=0.0,
+            delta_b=None,
+            border_mad=None,
+            n_border_pixels=0,
+            abstain_reason="invalid_image",
+            manufacturer_profile="generic",
+            metadata={
+                "reason": "load_failed",
+                "which": "flash",
+                "error": str(e),
+            },
+        )
+    try:
+        return analyze_substrate(front, flash)
+    except Exception as e:  # extremely defensive — analyze_* is no-raise by contract
+        return SubstrateResult(
+            score=0.5,
+            confidence=0.0,
+            delta_b=None,
+            border_mad=None,
+            n_border_pixels=0,
+            abstain_reason="invalid_image",
+            manufacturer_profile="generic",
+            metadata={"reason": "detector_failed", "error": str(e)},
+        )
+
+
 def _verdict_from_rosette(m: RosetteMeasurement) -> AuthenticityVerdict:
     """Translate the ml-side string verdict into the SQLAlchemy enum.
 
@@ -522,6 +626,17 @@ def _verdict_from_knn_reference(m: KnnReferenceResult) -> AuthenticityVerdict:
     for the abstain paths."""
     return AuthenticityVerdict(
         ensemble.verdict_from_knn_reference(m.score, m.confidence)
+    )
+
+
+def _verdict_from_substrate(m: SubstrateResult) -> AuthenticityVerdict:
+    """Same shape as the others against the substrate thresholds. The
+    detector self-abstains (UNVERIFIED) when the optional flash shot
+    wasn't captured, when front/flash shapes don't match, when either
+    image is invalid, or when the border ROI has too few pixels —
+    see `analyze_substrate_service` for the abstain paths."""
+    return AuthenticityVerdict(
+        ensemble.verdict_from_substrate(m.score, m.confidence)
     )
 
 
@@ -771,6 +886,68 @@ def _reasons_from_knn_reference(
     return reasons
 
 
+def _reasons_from_substrate(
+    m: SubstrateResult, verdict: AuthenticityVerdict
+) -> list[str]:
+    """Reasons formatter for the substrate / paper-fluorescence detector.
+    Reports delta_b on the border so reviewers can immediately see
+    whether the flash drove b* into fluorescence territory or stayed
+    near zero (no brightener signature)."""
+    reasons: list[str] = []
+    if verdict == AuthenticityVerdict.UNVERIFIED:
+        why = m.abstain_reason or (
+            m.metadata.get("reason") if isinstance(m.metadata, dict) else None
+        )
+        if why == "flash_not_captured":
+            reasons.append(
+                "front_full_flash shot not captured — substrate-fluorescence "
+                "signal skipped (optional capture step)"
+            )
+        elif why == "shape_mismatch":
+            reasons.append(
+                "front and flash canonicals had mismatched shapes — "
+                "substrate-fluorescence signal skipped"
+            )
+        elif why == "invalid_image":
+            reasons.append(
+                "front or flash canonical invalid for substrate analysis — "
+                "substrate-fluorescence signal skipped"
+            )
+        elif why == "border_too_small":
+            reasons.append(
+                "white-border ROI had too few pixels for stable b* "
+                "statistics — substrate-fluorescence signal skipped"
+            )
+        else:
+            reasons.append(
+                f"insufficient substrate confidence "
+                f"(confidence={m.confidence:.2f}, reason={why or 'unknown'})"
+            )
+        return reasons
+    if verdict == AuthenticityVerdict.AUTHENTIC:
+        reasons.append(
+            f"flash-vs-ambient border b* shift consistent with offset stock "
+            f"(substrate_score={m.score:.2f}, "
+            f"delta_b={(m.delta_b or 0.0):+.2f}, "
+            f"border_mad={(m.border_mad or 0.0):.2f})"
+        )
+    elif verdict == AuthenticityVerdict.LIKELY_COUNTERFEIT:
+        reasons.append(
+            f"strong negative b* shift on border under flash — "
+            f"optical-brightener signature consistent with photo paper "
+            f"(substrate_score={m.score:.2f}, "
+            f"delta_b={(m.delta_b or 0.0):+.2f}, "
+            f"border_mad={(m.border_mad or 0.0):.2f})"
+        )
+    else:  # SUSPICIOUS
+        reasons.append(
+            f"borderline border b* shift — neither cleanly authentic "
+            f"nor cleanly fluorescent (substrate_score={m.score:.2f}, "
+            f"delta_b={(m.delta_b or 0.0):+.2f})"
+        )
+    return reasons
+
+
 def _reasons_from_rosette(
     m: RosetteMeasurement, verdict: AuthenticityVerdict
 ) -> list[str]:
@@ -841,6 +1018,22 @@ def _knn_reference_no_signal(
     )
 
 
+def _substrate_no_signal(reason: str = "flash_not_captured") -> SubstrateResult:
+    """Default-shaped abstaining SubstrateResult for callers that don't
+    have a real measurement to pass in (legacy callers, tests). Mapped
+    to UNVERIFIED by the verdict mapper."""
+    return SubstrateResult(
+        score=0.5,
+        confidence=0.0,
+        delta_b=None,
+        border_mad=None,
+        n_border_pixels=0,
+        abstain_reason=reason,
+        manufacturer_profile="generic",
+        metadata={"reason": reason},
+    )
+
+
 def _typography_no_signal(reason: str = "no_expected_text") -> TypographyResult:
     """Default-shaped abstaining TypographyResult for callers that don't
     have a real measurement to pass in (legacy callers, tests). Mapped
@@ -867,6 +1060,7 @@ async def persist_authenticity_result(
     typography: TypographyResult | None = None,
     holographic: HolographicResult | None = None,
     knn_reference: KnnReferenceResult | None = None,
+    substrate: SubstrateResult | None = None,
 ) -> AuthenticityResult:
     """Insert or update the AuthenticityResult row for a submission.
 
@@ -897,12 +1091,15 @@ async def persist_authenticity_result(
         holographic = _holographic_no_signal()
     if knn_reference is None:
         knn_reference = _knn_reference_no_signal()
+    if substrate is None:
+        substrate = _substrate_no_signal()
     rosette_verdict = _verdict_from_rosette(rosette)
     color_verdict = _verdict_from_color_profile(color)
     embedding_verdict = _verdict_from_embedding_anomaly(embedding)
     typography_verdict = _verdict_from_typography(typography)
     holographic_verdict = _verdict_from_holographic(holographic)
     knn_reference_verdict = _verdict_from_knn_reference(knn_reference)
+    substrate_verdict = _verdict_from_substrate(substrate)
     verdict = _combine_verdicts(
         [
             rosette_verdict,
@@ -911,6 +1108,7 @@ async def persist_authenticity_result(
             typography_verdict,
             holographic_verdict,
             knn_reference_verdict,
+            substrate_verdict,
         ]
     )
 
@@ -987,6 +1185,24 @@ async def persist_authenticity_result(
             "verdict": knn_reference_verdict.value,
             "abstain_reason": knn_reference.abstain_reason,
         },
+        "substrate": {
+            "score": float(substrate.score),
+            "confidence": float(substrate.confidence),
+            "delta_b": (
+                float(substrate.delta_b)
+                if substrate.delta_b is not None
+                else None
+            ),
+            "border_mad": (
+                float(substrate.border_mad)
+                if substrate.border_mad is not None
+                else None
+            ),
+            "n_border_pixels": int(substrate.n_border_pixels),
+            "manufacturer_profile": substrate.manufacturer_profile,
+            "verdict": substrate_verdict.value,
+            "abstain_reason": substrate.abstain_reason,
+        },
     }
     reasons: list[str] = []
     reasons.extend(_reasons_from_rosette(rosette, rosette_verdict))
@@ -995,6 +1211,7 @@ async def persist_authenticity_result(
     reasons.extend(_reasons_from_typography(typography, typography_verdict))
     reasons.extend(_reasons_from_holographic(holographic, holographic_verdict))
     reasons.extend(_reasons_from_knn_reference(knn_reference, knn_reference_verdict))
+    reasons.extend(_reasons_from_substrate(substrate, substrate_verdict))
 
     model_versions = {
         "rosette": ROSETTE_MODEL_VERSION,
@@ -1003,6 +1220,7 @@ async def persist_authenticity_result(
         "typography": TYPOGRAPHY_MODEL_VERSION,
         "holographic": HOLOGRAPHIC_MODEL_VERSION,
         "knn_reference": KNN_REFERENCE_MODEL_VERSION,
+        "substrate": SUBSTRATE_MODEL_VERSION,
         "thresholds": {
             "rosette_authentic": ROSETTE_AUTHENTIC_THRESHOLD,
             "rosette_counterfeit": ROSETTE_COUNTERFEIT_THRESHOLD,
@@ -1022,6 +1240,9 @@ async def persist_authenticity_result(
             "knn_reference_authentic": KNN_REFERENCE_AUTHENTIC_THRESHOLD,
             "knn_reference_counterfeit": KNN_REFERENCE_COUNTERFEIT_THRESHOLD,
             "knn_reference_min_confidence": KNN_REFERENCE_MIN_CONFIDENCE,
+            "substrate_authentic": SUBSTRATE_AUTHENTIC_THRESHOLD,
+            "substrate_counterfeit": SUBSTRATE_COUNTERFEIT_THRESHOLD,
+            "substrate_min_confidence": SUBSTRATE_MIN_CONFIDENCE,
         },
     }
 
@@ -1044,6 +1265,8 @@ async def persist_authenticity_result(
         confident.append(float(holographic.confidence))
     if knn_reference.confidence >= KNN_REFERENCE_MIN_CONFIDENCE:
         confident.append(float(knn_reference.confidence))
+    if substrate.confidence >= SUBSTRATE_MIN_CONFIDENCE:
+        confident.append(float(substrate.confidence))
     combined_confidence = min(confident) if confident else 0.0
 
     existing = await db.scalar(

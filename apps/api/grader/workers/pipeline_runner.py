@@ -52,7 +52,11 @@ from grader.settings import get_settings
 # Tilt_30 is also optional (the wizard step is opt-in) — used by the
 # holographic-parallax counterfeit detector when present.
 REQUIRED_SHOTS: tuple[ShotKind, ...] = (ShotKind.FRONT_FULL,)
-OPTIONAL_SHOTS: tuple[ShotKind, ...] = (ShotKind.BACK_FULL, ShotKind.TILT_30)
+OPTIONAL_SHOTS: tuple[ShotKind, ...] = (
+    ShotKind.BACK_FULL,
+    ShotKind.TILT_30,
+    ShotKind.FRONT_FULL_FLASH,
+)
 
 
 @dataclass
@@ -139,6 +143,18 @@ def _run_detect_and_dewarp(
                 tilt_shot.s3_key, ShotKind.TILT_30, max_irregularity=0.45
             )
             canonicals[ShotKind.TILT_30] = tilt_result.canonical_s3_key
+        except detection.DetectionFailedError:
+            pass
+    # front_full_flash is the same geometry as front_full (just lit
+    # differently). Soft-fail: if dewarp can't find the card under
+    # blown-out flash highlights, the substrate detector abstains.
+    flash_shot = shots_by_kind.get(ShotKind.FRONT_FULL_FLASH)
+    if flash_shot is not None:
+        try:
+            flash_result = detection.detect_and_dewarp_shot(
+                flash_shot.s3_key, ShotKind.FRONT_FULL_FLASH
+            )
+            canonicals[ShotKind.FRONT_FULL_FLASH] = flash_result.canonical_s3_key
         except detection.DetectionFailedError:
             pass
     return canonicals
@@ -302,6 +318,15 @@ async def run_pipeline(
                 variant_id=chosen.entry.variant_id if chosen is not None else None,
                 references_store_path=get_settings().references_embeddings_path,
             )
+            # Substrate / paper-fluorescence: paired-flash differential b*
+            # on the white border. front_full_flash is OPTIONAL — when it
+            # wasn't captured the canonicals dict has no entry for it and
+            # the service abstains UNVERIFIED with reason='flash_not_captured'.
+            flash_canonical_key = canonicals.get(ShotKind.FRONT_FULL_FLASH)
+            substrate_measurement = counterfeit.analyze_substrate_service(
+                front_canonical_key,
+                flash_canonical_key,
+            )
             authenticity = await counterfeit.persist_authenticity_result(
                 submission_id=submission.id,
                 rosette=rosette_measurement,
@@ -310,6 +335,7 @@ async def run_pipeline(
                 typography=typography_measurement,
                 holographic=holographic_measurement,
                 knn_reference=knn_reference_measurement,
+                substrate=substrate_measurement,
                 db=db,
             )
             db.add(
@@ -364,6 +390,16 @@ async def run_pipeline(
                             knn_reference_measurement.mean_topk_distance
                         ),
                         "knn_reference_k": int(knn_reference_measurement.k),
+                        "substrate_score": float(substrate_measurement.score),
+                        "substrate_confidence": float(
+                            substrate_measurement.confidence
+                        ),
+                        "substrate_delta_b": (
+                            float(substrate_measurement.delta_b)
+                            if substrate_measurement.delta_b is not None
+                            else None
+                        ),
+                        "flash_canonical_present": flash_canonical_key is not None,
                         "combined_confidence": float(authenticity.confidence),
                     },
                 )

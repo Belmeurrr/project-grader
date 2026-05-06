@@ -768,6 +768,157 @@ def test_verdict_from_knn_reference_maps_to_enum() -> None:
     assert counterfeit._verdict_from_knn_reference(fake) == AV.LIKELY_COUNTERFEIT
 
 
+# -----------------------------
+# analyze_substrate_service — abstain paths and image-load envelope
+# -----------------------------
+
+
+def _put_substrate_pair(
+    bucket: str,
+    front_key: str,
+    flash_key: str | None,
+    *,
+    front_color: tuple[int, int, int] = (230, 230, 230),
+    flash_color: tuple[int, int, int] = (230, 230, 230),
+) -> None:
+    """Build a paired (front, flash) canonical pair and put both at the
+    given keys. flash_key=None skips the flash upload (used by the
+    'flash_not_captured' abstain path test)."""
+    front_img = np.full((1050, 750, 3), front_color, dtype=np.uint8)
+    _put_canonical(bucket, front_key, front_img)
+    if flash_key is not None:
+        flash_img = np.full((1050, 750, 3), flash_color, dtype=np.uint8)
+        _put_canonical(bucket, flash_key, flash_img)
+
+
+def test_analyze_substrate_service_abstains_when_flash_missing(
+    s3_bucket: str,
+) -> None:
+    """No flash canonical key (front_full_flash not captured) → abstain
+    UNVERIFIED with reason='flash_not_captured'. Documents the
+    optional-shot graceful-degradation path. Mirrors the holographic
+    service's tilt_not_captured abstain shape."""
+    front_key = "test/canonical_substrate_front.png"
+    _put_substrate_pair(s3_bucket, front_key, None)
+    r = counterfeit.analyze_substrate_service(front_key, None)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "flash_not_captured"
+    assert (
+        counterfeit._verdict_from_substrate(r) == AuthenticityVerdict.UNVERIFIED
+    )
+
+
+def test_analyze_substrate_service_does_not_raise_on_corrupt_front(
+    s3_bucket: str,
+) -> None:
+    """Corrupt front canonical → swallow + abstain. Like the holographic
+    + typography service wrappers, the substrate service never raises."""
+    front_key = "test/bad-substrate-front.png"
+    flash_key = "test/canonical_substrate_flash.png"
+    _put_canonical(
+        s3_bucket,
+        flash_key,
+        np.full((1050, 750, 3), 230, dtype=np.uint8),
+    )
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=s3_bucket,
+        Key=front_key,
+        Body=b"not a png",
+        ContentType="image/png",
+    )
+    r = counterfeit.analyze_substrate_service(front_key, flash_key)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "invalid_image"
+
+
+def test_analyze_substrate_service_does_not_raise_on_corrupt_flash(
+    s3_bucket: str,
+) -> None:
+    front_key = "test/canonical_substrate_front2.png"
+    flash_key = "test/bad-substrate-flash.png"
+    _put_canonical(
+        s3_bucket,
+        front_key,
+        np.full((1050, 750, 3), 230, dtype=np.uint8),
+    )
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=s3_bucket,
+        Key=flash_key,
+        Body=b"not a png",
+        ContentType="image/png",
+    )
+    r = counterfeit.analyze_substrate_service(front_key, flash_key)
+    assert r.confidence == 0.0
+    assert r.abstain_reason == "invalid_image"
+
+
+def test_analyze_substrate_service_happy_path_authentic(s3_bucket: str) -> None:
+    """Front + flash with similar near-neutral border b* → score lands
+    authentic-side. Documents the happy-path contract end-to-end through
+    the S3-load envelope."""
+    front_key = "test/canonical_substrate_happy_front.png"
+    flash_key = "test/canonical_substrate_happy_flash.png"
+    _put_substrate_pair(
+        s3_bucket,
+        front_key,
+        flash_key,
+        front_color=(230, 230, 230),
+        flash_color=(230, 230, 230),  # no fluorescence → delta_b ≈ 0
+    )
+    r = counterfeit.analyze_substrate_service(front_key, flash_key)
+    assert r.abstain_reason is None
+    assert r.confidence > 0.5
+    # delta_b should be ~0 on identical inputs (within rounding noise).
+    assert r.delta_b is not None
+    assert abs(r.delta_b) < 1.0
+    # Above the AUTHENTIC threshold (0.65) at default settings.
+    assert r.score >= 0.70
+    assert (
+        counterfeit._verdict_from_substrate(r) == AuthenticityVerdict.AUTHENTIC
+    )
+
+
+def test_verdict_from_substrate_maps_to_enum() -> None:
+    """The string verdicts from ml/pipelines/counterfeit/ensemble round-
+    trip cleanly into the SQLAlchemy AuthenticityVerdict enum for
+    substrate. Mirrors the matching tests for the other 6 detectors."""
+    from pipelines.counterfeit.substrate import SubstrateResult
+
+    AV = AuthenticityVerdict
+    abstain = SubstrateResult(
+        score=0.5,
+        confidence=0.0,
+        delta_b=None,
+        border_mad=None,
+        n_border_pixels=0,
+        abstain_reason="flash_not_captured",
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_substrate(abstain) == AV.UNVERIFIED
+
+    authentic = SubstrateResult(
+        score=0.85,
+        confidence=0.7,
+        delta_b=0.0,
+        border_mad=0.5,
+        n_border_pixels=70_000,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_substrate(authentic) == AV.AUTHENTIC
+
+    fake = SubstrateResult(
+        score=0.05,
+        confidence=0.7,
+        delta_b=-10.0,
+        border_mad=0.5,
+        n_border_pixels=70_000,
+        abstain_reason=None,
+        manufacturer_profile="generic",
+    )
+    assert counterfeit._verdict_from_substrate(fake) == AV.LIKELY_COUNTERFEIT
+
+
 def test_verdict_from_embedding_anomaly_maps_to_enum() -> None:
     """The string verdicts from ml/pipelines/counterfeit/ensemble round-
     trip cleanly into the SQLAlchemy AuthenticityVerdict enum."""

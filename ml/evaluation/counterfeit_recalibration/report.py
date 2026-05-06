@@ -62,6 +62,10 @@ _PATCH_CONSTANT_NAMES: dict[str, tuple[str, str]] = {
         "KNN_REFERENCE_AUTHENTIC_THRESHOLD",
         "KNN_REFERENCE_COUNTERFEIT_THRESHOLD",
     ),
+    "substrate": (
+        "SUBSTRATE_AUTHENTIC_THRESHOLD",
+        "SUBSTRATE_COUNTERFEIT_THRESHOLD",
+    ),
 }
 
 
@@ -90,6 +94,7 @@ def _detector_order(by_det: dict[str, ThresholdRecommendation]) -> list[str]:
         "typography",
         "holographic",
         "knn_reference",
+        "substrate",
     ]
     seen = set(by_det.keys())
     return [d for d in fixed if d in seen] + sorted(seen - set(fixed))

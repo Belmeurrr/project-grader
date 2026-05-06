@@ -471,12 +471,14 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert "typography" in authenticity.detector_scores
     assert "holographic" in authenticity.detector_scores
     assert "knn_reference" in authenticity.detector_scores
+    assert "substrate" in authenticity.detector_scores
     assert "rosette" in authenticity.model_versions
     assert "color" in authenticity.model_versions
     assert "embedding_anomaly" in authenticity.model_versions
     assert "typography" in authenticity.model_versions
     assert "holographic" in authenticity.model_versions
     assert "knn_reference" in authenticity.model_versions
+    assert "substrate" in authenticity.model_versions
     # Per-detector verdicts are stored in the detector_scores blob so a
     # later reviewer can see which detector pushed the combined verdict.
     assert "verdict" in authenticity.detector_scores["rosette"]
@@ -485,6 +487,19 @@ async def test_pipeline_persists_grade_and_authenticity_result(
     assert "verdict" in authenticity.detector_scores["typography"]
     assert "verdict" in authenticity.detector_scores["holographic"]
     assert "verdict" in authenticity.detector_scores["knn_reference"]
+    assert "verdict" in authenticity.detector_scores["substrate"]
+    # Substrate abstains UNVERIFIED when no front_full_flash shot is in
+    # the submission (the wizard step is optional). Documents the
+    # graceful-degradation path — same shape as the holographic detector's
+    # tilt_not_captured abstain.
+    assert (
+        authenticity.detector_scores["substrate"]["verdict"]
+        == AuthenticityVerdict.UNVERIFIED.value
+    )
+    assert (
+        authenticity.detector_scores["substrate"]["abstain_reason"]
+        == "flash_not_captured"
+    )
     # k-NN reference abstains UNVERIFIED when the empty catalog leaves
     # the variant unidentified — same shape as embedding-anomaly's
     # abstain on the same input. Documents the graceful-degradation path.

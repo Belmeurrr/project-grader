@@ -21,6 +21,10 @@ from pipelines.counterfeit.rosette import (
     is_likely_authentic,
     measure_rosette,
 )
+from pipelines.counterfeit.substrate import (
+    SubstrateResult,
+    analyze_substrate,
+)
 from pipelines.counterfeit.typography import (
     TypographyResult,
     analyze_typography,
@@ -48,4 +52,7 @@ __all__ = [
     # k-NN reference (mean cosine distance to top-k authentic exemplars) — #1
     "KnnReferenceResult",
     "analyze_knn_reference",
+    # Substrate / paper-fluorescence (paired-flash differential b*) — #6
+    "SubstrateResult",
+    "analyze_substrate",
 ]
