@@ -11,6 +11,17 @@ class Settings(BaseSettings):
     env: Literal["dev", "staging", "prod"] = "dev"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
+    # Optional Sentry DSN for error tracking. When unset (default), Sentry
+    # is not initialized — the app runs cleanly with zero external calls.
+    # Free tier covers our first ~10 users; opt-in by setting SENTRY_DSN.
+    sentry_dsn: str | None = Field(
+        default=None,
+        description=(
+            "Sentry DSN for error tracking. When unset, sentry_sdk.init() is "
+            "skipped entirely (no network calls, no Sentry hub installed)."
+        ),
+    )
+
     database_url: str = Field(
         default="postgresql+asyncpg://grader:grader@localhost:5432/grader",
         description="Postgres connection string for SQLAlchemy async engine.",

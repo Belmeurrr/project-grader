@@ -21,12 +21,17 @@ that already have an event loop and a session).
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+import structlog
+from pipelines.identification import (
+    CatalogIndex,
+    ImageEmbedder,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -41,11 +46,6 @@ from grader.db.models import (
 )
 from grader.services import counterfeit, detection, grading, identification
 from grader.settings import get_settings
-from pipelines.identification import (
-    CatalogIndex,
-    ImageEmbedder,
-)
-
 
 # Shots that v1 (centering-only) requires before grading can run.
 # Front is required; back is optional (PSA centering can grade front-only).
@@ -186,11 +186,21 @@ async def run_pipeline(
     db.add(_audit(submission.id, "pipeline.started", {}))
     await db.flush()
 
+    pipeline_log = structlog.get_logger("grader.pipeline")
+
     # Stage 1 + 2: detect + dewarp.
-    try:
-        canonicals = _run_detect_and_dewarp(shots_by_kind)
-    except detection.DetectionFailedError as e:
-        return await _mark_failed(submission, db, f"detection_failed: {e}")
+    stage_start = time.perf_counter()
+    with structlog.contextvars.bound_contextvars(
+        stage="detection", submission_id=str(submission.id)
+    ):
+        try:
+            canonicals = _run_detect_and_dewarp(shots_by_kind)
+        except detection.DetectionFailedError as e:
+            return await _mark_failed(submission, db, f"detection_failed: {e}")
+        pipeline_log.info(
+            "pipeline.stage.completed",
+            duration_ms=round((time.perf_counter() - stage_start) * 1000.0, 2),
+        )
 
     if ShotKind.FRONT_FULL not in canonicals:
         return await _mark_failed(
@@ -208,23 +218,31 @@ async def run_pipeline(
 
     # Stage 3: identification (soft-fail; we still grade unidentified cards).
     front_canonical_key = canonicals[ShotKind.FRONT_FULL]
-    try:
-        id_outcome = await identification.identify_canonical_for_submission(
-            submission_id=submission.id,
-            canonical_s3_key=front_canonical_key,
-            catalog=catalog,
-            embedder=embedder,
-            db=db,
+    stage_start = time.perf_counter()
+    with structlog.contextvars.bound_contextvars(
+        stage="identification", submission_id=str(submission.id)
+    ):
+        try:
+            id_outcome = await identification.identify_canonical_for_submission(
+                submission_id=submission.id,
+                canonical_s3_key=front_canonical_key,
+                catalog=catalog,
+                embedder=embedder,
+                db=db,
+            )
+            identified_variant = (
+                uuid.UUID(id_outcome.result.chosen.entry.variant_id)
+                if id_outcome.result.chosen
+                else None
+            )
+        except identification.IdentificationFailedError as e:
+            # Hard fail only if the canonical itself is unreadable. Catalog miss
+            # is handled inside identify_canonical_for_submission as a soft fail.
+            return await _mark_failed(submission, db, f"identification_failed: {e}")
+        pipeline_log.info(
+            "pipeline.stage.completed",
+            duration_ms=round((time.perf_counter() - stage_start) * 1000.0, 2),
         )
-        identified_variant = (
-            uuid.UUID(id_outcome.result.chosen.entry.variant_id)
-            if id_outcome.result.chosen
-            else None
-        )
-    except identification.IdentificationFailedError as e:
-        # Hard fail only if the canonical itself is unreadable. Catalog miss
-        # is handled inside identify_canonical_for_submission as a soft fail.
-        return await _mark_failed(submission, db, f"identification_failed: {e}")
 
     # Stage 3.5: counterfeit-authenticity check. Five detectors:
     #   - rosette FFT (image-only)
@@ -242,142 +260,160 @@ async def run_pipeline(
     # so the cert page always has *some* authenticity row to display.
     db.add(_audit(submission.id, "pipeline.counterfeit.started", {}))
     await db.flush()
-    try:
-        rosette_measurement = counterfeit.analyze_rosette(front_canonical_key)
-        color_measurement = counterfeit.analyze_color_profile(front_canonical_key)
-        chosen = id_outcome.result.chosen
-        embedding_measurement = counterfeit.analyze_embedding_anomaly(
-            submitted_embedding=id_outcome.result.submitted_embedding,
-            manufacturer=chosen.entry.game if chosen is not None else None,
-            variant_id=chosen.entry.variant_id if chosen is not None else None,
-            references_store_path=get_settings().references_embeddings_path,
+    stage_start = time.perf_counter()
+    with structlog.contextvars.bound_contextvars(
+        stage="counterfeit", submission_id=str(submission.id)
+    ):
+        try:
+            rosette_measurement = counterfeit.analyze_rosette(front_canonical_key)
+            color_measurement = counterfeit.analyze_color_profile(front_canonical_key)
+            chosen = id_outcome.result.chosen
+            embedding_measurement = counterfeit.analyze_embedding_anomaly(
+                submitted_embedding=id_outcome.result.submitted_embedding,
+                manufacturer=chosen.entry.game if chosen is not None else None,
+                variant_id=chosen.entry.variant_id if chosen is not None else None,
+                references_store_path=get_settings().references_embeddings_path,
+            )
+            typography_measurement = counterfeit.analyze_typography_service(
+                front_canonical_key,
+                chosen.entry.name if chosen is not None else None,
+            )
+            # tilt_30 is optional — pass None to the service when no canonical
+            # was produced (either the shot wasn't captured, or detection
+            # failed on it). The detector turns None into an UNVERIFIED
+            # abstain with abstain_reason='tilt_not_captured'.
+            tilt_canonical_key = canonicals.get(ShotKind.TILT_30)
+            holographic_measurement = counterfeit.analyze_holographic_service(
+                front_canonical_key,
+                tilt_canonical_key,
+            )
+            authenticity = await counterfeit.persist_authenticity_result(
+                submission_id=submission.id,
+                rosette=rosette_measurement,
+                color=color_measurement,
+                embedding=embedding_measurement,
+                typography=typography_measurement,
+                holographic=holographic_measurement,
+                db=db,
+            )
+            db.add(
+                _audit(
+                    submission.id,
+                    "pipeline.counterfeit.completed",
+                    {
+                        "verdict": authenticity.verdict.value,
+                        "rosette_score": float(rosette_measurement.rosette_score),
+                        "rosette_confidence": float(rosette_measurement.confidence),
+                        "rosette_analyzed_patches": int(
+                            rosette_measurement.analyzed_patches
+                        ),
+                        "color_score": float(color_measurement.color_score),
+                        "color_confidence": float(color_measurement.confidence),
+                        "color_p95_chroma": float(color_measurement.p95_chroma),
+                        "embedding_score": float(embedding_measurement.embedding_score),
+                        "embedding_confidence": float(embedding_measurement.confidence),
+                        "embedding_n_references": int(
+                            embedding_measurement.n_references
+                        ),
+                        "typography_score": float(typography_measurement.score),
+                        "typography_confidence": float(typography_measurement.confidence),
+                        "typography_levenshtein": (
+                            int(typography_measurement.levenshtein_distance)
+                            if typography_measurement.levenshtein_distance is not None
+                            else None
+                        ),
+                        "holographic_score": float(holographic_measurement.score),
+                        "holographic_confidence": float(holographic_measurement.confidence),
+                        "holographic_flow_ratio": (
+                            float(holographic_measurement.flow_ratio)
+                            if holographic_measurement.flow_ratio is not None
+                            else None
+                        ),
+                        "holographic_mask_fraction": (
+                            float(holographic_measurement.holo_mask_fraction)
+                            if holographic_measurement.holo_mask_fraction is not None
+                            else None
+                        ),
+                        "tilt_canonical_present": tilt_canonical_key is not None,
+                        "combined_confidence": float(authenticity.confidence),
+                    },
+                )
+            )
+            await db.flush()
+        except counterfeit.CounterfeitFailedError as e:
+            db.add(
+                _audit(
+                    submission.id,
+                    "pipeline.counterfeit.skipped",
+                    {"reason": str(e)},
+                )
+            )
+            await db.flush()
+        pipeline_log.info(
+            "pipeline.stage.completed",
+            duration_ms=round((time.perf_counter() - stage_start) * 1000.0, 2),
         )
-        typography_measurement = counterfeit.analyze_typography_service(
-            front_canonical_key,
-            chosen.entry.name if chosen is not None else None,
-        )
-        # tilt_30 is optional — pass None to the service when no canonical
-        # was produced (either the shot wasn't captured, or detection
-        # failed on it). The detector turns None into an UNVERIFIED
-        # abstain with abstain_reason='tilt_not_captured'.
-        tilt_canonical_key = canonicals.get(ShotKind.TILT_30)
-        holographic_measurement = counterfeit.analyze_holographic_service(
-            front_canonical_key,
-            tilt_canonical_key,
-        )
-        authenticity = await counterfeit.persist_authenticity_result(
+
+    # Stage 4: grade compose — centering + edges + completion. One bound
+    # stage to keep the per-stage timing aggregable; the AuditLog still
+    # records the per-step transitions for audit/replay.
+    stage_start = time.perf_counter()
+    with structlog.contextvars.bound_contextvars(
+        stage="grade_compose", submission_id=str(submission.id)
+    ):
+        try:
+            centering_result = grading.grade_centering(
+                front_canonical_s3_key=front_canonical_key,
+                back_canonical_s3_key=canonicals.get(ShotKind.BACK_FULL),
+            )
+        except grading.GradingFailedError as e:
+            return await _mark_failed(submission, db, f"grading_failed: {e}")
+
+        grade = await grading.persist_centering_grade(
             submission_id=submission.id,
-            rosette=rosette_measurement,
-            color=color_measurement,
-            embedding=embedding_measurement,
-            typography=typography_measurement,
-            holographic=holographic_measurement,
+            result=centering_result,
             db=db,
+            scheme=GradingScheme.PSA,
         )
+
+        # Edges: geometric, deterministic, no model. Runs after centering
+        # so the Grade row already exists.
+        try:
+            edges_result = grading.grade_edges(
+                front_canonical_s3_key=front_canonical_key,
+                back_canonical_s3_key=canonicals.get(ShotKind.BACK_FULL),
+            )
+        except grading.GradingFailedError as e:
+            return await _mark_failed(submission, db, f"grading_edges_failed: {e}")
+
+        grade = await grading.persist_edges_grade(
+            submission_id=submission.id,
+            result=edges_result,
+            db=db,
+            scheme=GradingScheme.PSA,
+        )
+
+        submission.status = SubmissionStatus.COMPLETED
+        submission.completed_at = datetime.now(UTC)
         db.add(
             _audit(
                 submission.id,
-                "pipeline.counterfeit.completed",
+                "pipeline.completed",
                 {
-                    "verdict": authenticity.verdict.value,
-                    "rosette_score": float(rosette_measurement.rosette_score),
-                    "rosette_confidence": float(rosette_measurement.confidence),
-                    "rosette_analyzed_patches": int(
-                        rosette_measurement.analyzed_patches
-                    ),
-                    "color_score": float(color_measurement.color_score),
-                    "color_confidence": float(color_measurement.confidence),
-                    "color_p95_chroma": float(color_measurement.p95_chroma),
-                    "embedding_score": float(embedding_measurement.embedding_score),
-                    "embedding_confidence": float(embedding_measurement.confidence),
-                    "embedding_n_references": int(
-                        embedding_measurement.n_references
-                    ),
-                    "typography_score": float(typography_measurement.score),
-                    "typography_confidence": float(typography_measurement.confidence),
-                    "typography_levenshtein": (
-                        int(typography_measurement.levenshtein_distance)
-                        if typography_measurement.levenshtein_distance is not None
-                        else None
-                    ),
-                    "holographic_score": float(holographic_measurement.score),
-                    "holographic_confidence": float(holographic_measurement.confidence),
-                    "holographic_flow_ratio": (
-                        float(holographic_measurement.flow_ratio)
-                        if holographic_measurement.flow_ratio is not None
-                        else None
-                    ),
-                    "holographic_mask_fraction": (
-                        float(holographic_measurement.holo_mask_fraction)
-                        if holographic_measurement.holo_mask_fraction is not None
-                        else None
-                    ),
-                    "tilt_canonical_present": tilt_canonical_key is not None,
-                    "combined_confidence": float(authenticity.confidence),
+                    "centering": centering_result.psa_subgrade,
+                    "edges": edges_result.psa_subgrade,
+                    "edges_worse_face": edges_result.worse_face,
+                    "confidence": grade.confidence,
+                    "back_centering_used": centering_result.back_measurement is not None,
+                    "back_edges_used": edges_result.back_measurement is not None,
                 },
             )
         )
         await db.flush()
-    except counterfeit.CounterfeitFailedError as e:
-        db.add(
-            _audit(
-                submission.id,
-                "pipeline.counterfeit.skipped",
-                {"reason": str(e)},
-            )
+        pipeline_log.info(
+            "pipeline.stage.completed",
+            duration_ms=round((time.perf_counter() - stage_start) * 1000.0, 2),
         )
-        await db.flush()
-
-    # Stage 4 (partial): centering.
-    try:
-        centering_result = grading.grade_centering(
-            front_canonical_s3_key=front_canonical_key,
-            back_canonical_s3_key=canonicals.get(ShotKind.BACK_FULL),
-        )
-    except grading.GradingFailedError as e:
-        return await _mark_failed(submission, db, f"grading_failed: {e}")
-
-    grade = await grading.persist_centering_grade(
-        submission_id=submission.id,
-        result=centering_result,
-        db=db,
-        scheme=GradingScheme.PSA,
-    )
-
-    # Stage 4 (partial cont.): edges. Geometric, deterministic, no model. Runs
-    # after centering so the Grade row already exists.
-    try:
-        edges_result = grading.grade_edges(
-            front_canonical_s3_key=front_canonical_key,
-            back_canonical_s3_key=canonicals.get(ShotKind.BACK_FULL),
-        )
-    except grading.GradingFailedError as e:
-        return await _mark_failed(submission, db, f"grading_edges_failed: {e}")
-
-    grade = await grading.persist_edges_grade(
-        submission_id=submission.id,
-        result=edges_result,
-        db=db,
-        scheme=GradingScheme.PSA,
-    )
-
-    submission.status = SubmissionStatus.COMPLETED
-    submission.completed_at = datetime.now(timezone.utc)
-    db.add(
-        _audit(
-            submission.id,
-            "pipeline.completed",
-            {
-                "centering": centering_result.psa_subgrade,
-                "edges": edges_result.psa_subgrade,
-                "edges_worse_face": edges_result.worse_face,
-                "confidence": grade.confidence,
-                "back_centering_used": centering_result.back_measurement is not None,
-                "back_edges_used": edges_result.back_measurement is not None,
-            },
-        )
-    )
-    await db.flush()
 
     return PipelineRunResult(
         submission_id=submission.id,

@@ -1,8 +1,14 @@
-from contextlib import asynccontextmanager
+import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import sentry_sdk
+import structlog
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sentry_sdk.integrations.celery import CeleryIntegration
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 
 from grader import __version__
 from grader.logging import configure_logging, get_logger
@@ -17,9 +23,24 @@ from grader.settings import get_settings
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    # Sentry must come before logging so any failure during configure_logging
+    # itself is captured. It's opt-in: when SENTRY_DSN is unset, we skip the
+    # init entirely — no network calls, no global hub installed.
+    if settings.sentry_dsn:
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            traces_sample_rate=0.1,
+            environment=settings.env,
+            integrations=[
+                FastApiIntegration(),
+                CeleryIntegration(),
+                SqlalchemyIntegration(),
+            ],
+        )
     configure_logging()
     log = get_logger(__name__)
-    log.info("api.startup", version=__version__)
+    log.info("api.startup", version=__version__, sentry_enabled=bool(settings.sentry_dsn))
     yield
     log.info("api.shutdown")
 
@@ -47,6 +68,27 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Request timer — emits one structured log line per request with the
+    # duration in ms. Sits AFTER CORS in registration order, which (in
+    # FastAPI/Starlette) means it runs INSIDE CORS in the dispatch chain:
+    # CORS sees the request first, the timer wraps the actual route. This
+    # is what we want — preflight OPTIONS handled by CORS shouldn't show
+    # up as application traffic, and timing measures real route work.
+    @app.middleware("http")
+    async def request_timer(request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        structlog.get_logger("grader.http").info(
+            "http.request",
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            duration_ms=round(duration_ms, 2),
+        )
+        return response
+
     app.include_router(health.router)
     app.include_router(submissions.router)
     app.include_router(cert.router)

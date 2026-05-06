@@ -25,6 +25,7 @@ dependencies = [
   "pillow>=11.0.0",
   "slowapi>=0.1.9",
   "grader-ml",
+  "sentry-sdk[fastapi]>=2.59.0",
 ]
 
 [tool.uv.sources]
