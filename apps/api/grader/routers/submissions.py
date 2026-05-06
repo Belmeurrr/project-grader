@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -29,6 +29,8 @@ from grader.schemas.submissions import (
 )
 from grader.services import quality, storage
 from grader.services.auth import get_current_user
+from grader.services.rate_limit import limiter, user_or_ip_key
+from grader.settings import get_settings
 from grader.workers.pipeline_runner import REQUIRED_SHOTS
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
@@ -46,7 +48,9 @@ async def _load_owned_submission(
 
 
 @router.post("", response_model=SubmissionOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute", key_func=user_or_ip_key)
 async def create_submission(
+    request: Request,
     payload: SubmissionCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -58,25 +62,24 @@ async def create_submission(
     )
     db.add(submission)
     await db.commit()
-    # Re-fetch with the same selectinload options that `_to_out` requires,
-    # using `populate_existing=True` so the options apply even though the
-    # row is already in the identity map from the just-committed write.
-    # Without this the relationship attributes (`.grades`, `.authenticity`,
-    # `.identified_variant`) are unloaded and accessing them in `_to_out`
-    # triggers a sync lazy-load under asyncpg → MissingGreenlet.
-    submission = await db.get(
-        Submission,
-        submission.id,
-        options=[
+    # Re-fetch with relationships eager-loaded so `_to_out` doesn't trigger
+    # an async lazy-load (raises MissingGreenlet on asyncpg). Use
+    # `select(...).options(...)` rather than `db.get(..., options=...)` —
+    # the SA 2.0 `get()` overload silently drops `selectinload` options,
+    # leaving the relationships unloaded.
+    submission_id = submission.id
+    result = await db.execute(
+        select(Submission)
+        .where(Submission.id == submission_id)
+        .options(
             selectinload(Submission.grades),
             selectinload(Submission.authenticity),
             selectinload(Submission.identified_variant).selectinload(
                 CardVariant.set
             ),
-        ],
-        populate_existing=True,
+        )
     )
-    assert submission is not None  # we just committed it
+    submission = result.scalar_one()
     return _to_out(submission)
 
 
@@ -86,23 +89,23 @@ async def get_submission(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> SubmissionOut:
-    submission = await db.get(
-        Submission,
-        submission_id,
-        options=[
+    # Use `select(...).options(...)` rather than `db.get(..., options=...)`:
+    # the SA-2.0.x release we ship silently drops the `options=`
+    # argument from `get(...)`, leaving relationships unloaded and
+    # crashing `_to_out` with MissingGreenlet on its first attribute
+    # access.
+    result = await db.execute(
+        select(Submission)
+        .where(Submission.id == submission_id)
+        .options(
             selectinload(Submission.grades),
             selectinload(Submission.authenticity),
             selectinload(Submission.identified_variant).selectinload(
                 CardVariant.set
             ),
-        ],
-        # `populate_existing=True` makes the eager-load options apply even
-        # when the row is already in the session's identity map (e.g. from
-        # a recent write in the same async session). Without it, a cache
-        # hit silently drops the selectinload options and `_to_out` then
-        # triggers a sync lazy-load under asyncpg → MissingGreenlet.
-        populate_existing=True,
+        )
     )
+    submission = result.scalar_one_or_none()
     if submission is None or submission.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="submission not found")
     return _to_out(submission)
@@ -113,20 +116,27 @@ async def get_submission(
     response_model=ShotUploadUrlResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("60/minute", key_func=user_or_ip_key)
 async def request_shot_upload_url(
+    request: Request,
     submission_id: uuid.UUID,
     payload: ShotUploadUrlRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ShotUploadUrlResponse:
-    """Issue a presigned PUT URL for the client to upload one shot directly to S3.
+    """Issue a presigned POST form for the client to upload one shot directly to S3.
 
     The shot row is NOT created here — only after the client confirms the
     upload via POST /shots. We reserve the shot_id up-front so the client
-    can include it in the eventual register request and we can correlate."""
+    can include it in the eventual register request and we can correlate.
+
+    The presigned-POST policy pins the upload size to
+    ``settings.submission_max_image_bytes``; oversized uploads are
+    rejected by S3 server-side. ``register_shot`` re-checks the size
+    via HEAD as defense-in-depth."""
     await _load_owned_submission(submission_id, user, db)
     shot_id = uuid.uuid4()
-    presigned = storage.presigned_put_for_shot(
+    presigned = storage.presigned_post_for_shot(
         submission_id=submission_id,
         shot_id=shot_id,
         kind=payload.kind.value,
@@ -134,10 +144,10 @@ async def request_shot_upload_url(
     )
     return ShotUploadUrlResponse(
         shot_id=shot_id,
-        upload_url=presigned.upload_url,
+        url=presigned.url,
+        fields=presigned.fields,
         s3_key=presigned.s3_key,
         expires_at=presigned.expires_at,
-        required_headers=presigned.required_headers,
     )
 
 
@@ -146,7 +156,9 @@ async def request_shot_upload_url(
     response_model=ShotOut,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("60/minute", key_func=user_or_ip_key)
 async def register_shot(
+    request: Request,
     submission_id: uuid.UUID,
     payload: ShotRegisterRequest,
     db: AsyncSession = Depends(get_db),
@@ -184,6 +196,31 @@ async def register_shot(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"unrecognized shot kind in key: {kind_str}",
+        )
+
+    # Defense-in-depth on the upload size cap. The presigned-POST policy
+    # already pins ``content-length-range``, so a well-behaved S3 / MinIO
+    # rejects oversized PUTs at upload time. We re-check via HEAD here
+    # because (a) MinIO has historically had soft enforcement gaps
+    # around the policy and (b) the safest place to learn the on-disk
+    # object size is from the bucket itself, not the client. A 413 here
+    # is shaped intentionally to match the cap copy in the wizard.
+    settings = get_settings()
+    head = storage.head_shot(payload.s3_key)
+    if head is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="upload not found in storage; PUT may have failed",
+        )
+    size = int(head.get("content_length") or 0)
+    if size > settings.submission_max_image_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={
+                "reason": "upload_too_large",
+                "max_bytes": settings.submission_max_image_bytes,
+                "got_bytes": size,
+            },
         )
 
     try:
@@ -225,7 +262,9 @@ async def register_shot(
     response_model=SubmitResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
+@limiter.limit("5/minute", key_func=user_or_ip_key)
 async def submit_submission(
+    request: Request,
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),

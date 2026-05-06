@@ -63,12 +63,24 @@ export type SubmissionOut = {
   // about status.
 };
 
+/**
+ * Presigned-POST form payload for direct browser → S3 upload.
+ *
+ * The shape mirrors AWS's ``generate_presigned_post`` response: the
+ * client sends a ``multipart/form-data`` POST against ``url`` with
+ * every entry in ``fields`` set verbatim and the file blob appended
+ * last under field name ``file``. The server-side policy embedded in
+ * ``fields.policy`` includes a ``content-length-range`` condition,
+ * so S3 enforces the max image size during upload — a malicious
+ * client can't push a 5 GB blob through a presigned URL meant for
+ * phone-photo-sized uploads.
+ */
 export type ShotUploadUrlResponse = {
   shot_id: string;
-  upload_url: string;
+  url: string;
+  fields: Record<string, string>;
   s3_key: string;
   expires_at: string;
-  required_headers: Record<string, string>;
 };
 
 export type ShotOut = {
@@ -226,21 +238,34 @@ export async function requestShotUploadUrl(
 }
 
 /**
- * Direct PUT to the presigned S3 URL. Pass through the
- * `required_headers` from the upload-url response verbatim — S3
- * signature validation hashes Content-Type and any x-amz-* headers
- * exactly as listed.
+ * Direct multipart POST to the presigned S3 URL. The server hands us
+ * a ``url`` + ``fields`` pair (the AWS presigned-POST shape); we
+ * append every field verbatim — order matters for the policy
+ * signature — then append the file blob last under field name
+ * ``file``.
+ *
+ * Why POST not PUT: the presigned-POST form embeds a signed policy
+ * with a ``content-length-range`` condition, so S3 server-side
+ * rejects uploads that exceed our configured cap. A presigned PUT
+ * URL has no such enforcement.
+ *
+ * IMPORTANT: do NOT set ``Content-Type`` on the request — the
+ * browser must compute the multipart boundary header itself, and
+ * setting Content-Type explicitly clobbers that.
  */
 export async function uploadShotToS3(
   url: string,
   blob: Blob,
-  requiredHeaders: Record<string, string>,
+  fields: Record<string, string>,
 ): Promise<void> {
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: requiredHeaders,
-    body: blob,
-  });
+  const form = new FormData();
+  // Fields must be appended before the file blob — S3 reads them in
+  // order to validate the signed policy.
+  for (const [name, value] of Object.entries(fields)) {
+    form.append(name, value);
+  }
+  form.append("file", blob);
+  const res = await fetch(url, { method: "POST", body: form });
   if (!res.ok) {
     throw new Error(`s3 upload failed: ${res.status} ${res.statusText}`);
   }
@@ -278,14 +303,14 @@ export async function submitForGrading(
 // --------------------------------------------------------------------------
 
 /**
- * Three-step shot upload: presign → PUT → register. Returns the
- * server-side ShotOut so the caller can decide whether quality passed
- * and either advance the wizard or prompt for retake.
+ * Three-step shot upload: presign → multipart POST → register.
+ * Returns the server-side ShotOut so the caller can decide whether
+ * quality passed and either advance the wizard or prompt for retake.
  *
  * Errors propagate; the caller is expected to surface them to the
  * user. We don't retry automatically — quality failures are the
  * common case and the user needs to physically re-shoot, not the
- * client to re-PUT.
+ * client to re-POST.
  */
 export async function uploadShot(
   authedFetch: AuthedFetch,
@@ -300,7 +325,7 @@ export async function uploadShot(
     kind,
     contentType,
   );
-  await uploadShotToS3(presigned.upload_url, blob, presigned.required_headers);
+  await uploadShotToS3(presigned.url, blob, presigned.fields);
   return registerShot(
     authedFetch,
     submissionId,

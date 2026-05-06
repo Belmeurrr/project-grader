@@ -264,6 +264,50 @@ async def test_submit_503_when_broker_unavailable_and_retry_succeeds(
 
 
 @pytest.mark.asyncio
+async def test_submit_rate_limited_at_5_per_minute_per_user(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    s3_bucket: str,
+    db_session,
+    _stub_celery_dispatch,
+) -> None:
+    """slowapi guards POST /submissions/{id}/submit at 5/min per user.
+
+    The 6th request from the same Clerk user inside a minute must
+    return 429. We bypass the idempotency early-return (which would
+    short-circuit subsequent calls to 202 without going through the
+    limiter on a re-entry path the real attacker doesn't have) by
+    forcing the row back to CAPTURING between attempts — that's the
+    hot loop a malicious client trying to flood the broker would use.
+
+    Reset the slowapi limiter storage at the start so prior tests'
+    counters don't leak in (the limiter is a module-level singleton
+    and per-test isolation is not built into slowapi)."""
+    from grader.db.models import Submission
+    from grader.services.rate_limit import limiter
+
+    limiter.reset()
+
+    sid = await _create_submission(client, auth_headers)
+    await _upload_and_register_shot(client, auth_headers, sid, s3_bucket)
+
+    statuses: list[int] = []
+    for _ in range(6):
+        # Force submission back to CAPTURING so /submit doesn't take
+        # the idempotent fast-path on calls 2+.
+        sub = await db_session.get(Submission, uuid.UUID(sid))
+        sub.status = SubmissionStatus.CAPTURING
+        await db_session.commit()
+
+        r = await client.post(f"/submissions/{sid}/submit", headers=auth_headers)
+        statuses.append(r.status_code)
+
+    # First 5 succeed (202), 6th hits the limiter (429).
+    assert statuses[:5] == [202, 202, 202, 202, 202], statuses
+    assert statuses[5] == 429, statuses
+
+
+@pytest.mark.asyncio
 async def test_submit_returns_existing_state_for_completed_submission(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],

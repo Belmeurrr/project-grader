@@ -61,16 +61,41 @@ def test_shot_s3_key_rejects_unknown_content_type() -> None:
         storage.shot_s3_key(sub, shot, "front_full", "image/tiff")
 
 
-def test_presigned_put_for_shot_round_trip(s3_bucket: str) -> None:
+def test_presigned_post_for_shot_round_trip(s3_bucket: str) -> None:
     sub = uuid.uuid4()
     shot = uuid.uuid4()
-    presigned = storage.presigned_put_for_shot(sub, shot, "front_full", "image/jpeg")
+    presigned = storage.presigned_post_for_shot(sub, shot, "front_full", "image/jpeg")
     assert presigned.s3_key.startswith(f"submissions/{sub}/shots/{shot}/")
-    assert presigned.upload_url.startswith("http")
-    assert presigned.required_headers == {"Content-Type": "image/jpeg"}
-    # The signed URL targets the right bucket and key.
-    assert s3_bucket in presigned.upload_url or "/" + s3_bucket + "/" in presigned.upload_url
-    assert presigned.s3_key in presigned.upload_url
+    assert presigned.url.startswith("http")
+    # The fields dict is the multipart-form payload the client posts;
+    # the signature is over the embedded policy document.
+    assert "policy" in presigned.fields
+    assert "x-amz-signature" in presigned.fields
+    assert presigned.fields["Content-Type"] == "image/jpeg"
+    assert presigned.fields["key"] == presigned.s3_key
+    # The signed URL targets the right bucket.
+    assert s3_bucket in presigned.url or "/" + s3_bucket + "/" in presigned.url
+
+
+def test_presigned_post_policy_pins_content_length_range(s3_bucket: str) -> None:
+    """The size cap is the entire reason we use POST instead of PUT —
+    if the policy ever stops including ``content-length-range`` we've
+    silently regressed back to unbounded uploads."""
+    import base64
+    import json as _json
+
+    from grader.settings import get_settings as _get_settings
+
+    sub = uuid.uuid4()
+    shot = uuid.uuid4()
+    presigned = storage.presigned_post_for_shot(sub, shot, "front_full", "image/jpeg")
+    policy_b64 = presigned.fields["policy"]
+    policy = _json.loads(base64.b64decode(policy_b64).decode("utf-8"))
+    conditions = policy["conditions"]
+    length_cond = next((c for c in conditions if isinstance(c, list) and c and c[0] == "content-length-range"), None)
+    assert length_cond is not None, f"no content-length-range condition in policy: {conditions}"
+    assert length_cond[1] == 1
+    assert length_cond[2] == _get_settings().submission_max_image_bytes
 
 
 def test_head_shot_returns_none_for_missing_object(s3_bucket: str) -> None:

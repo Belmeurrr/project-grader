@@ -23,6 +23,7 @@ dependencies = [
   "numpy>=2.1.0",
   "opencv-python-headless>=4.10.0",
   "pillow>=11.0.0",
+  "slowapi>=0.1.9",
   "grader-ml",
 ]
 

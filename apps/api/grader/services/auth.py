@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 import jwt
 from cryptography.hazmat.primitives import serialization
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -298,14 +298,17 @@ async def _authenticate_clerk(
 
 
 async def get_current_user(
+    request: Request,
     authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Resolve the current user from the Authorization header.
 
     Routes a request to either the dev stub or full Clerk JWT verification
-    based on ``settings.dev_auth_enabled``. The dependency signature (and
-    thus the FastAPI contract) is unchanged from the original stub.
+    based on ``settings.dev_auth_enabled``. After resolving, the User is
+    attached to ``request.state.user`` so downstream consumers (notably
+    the slowapi rate-limit ``key_func``) can read it without re-running
+    the dependency.
     """
     if authorization is None:
         raise HTTPException(
@@ -323,11 +326,16 @@ async def get_current_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="bad auth scheme",
             )
-        return await _authenticate_dev(token, db)
+        user = await _authenticate_dev(token, db)
+    else:
+        if scheme_lower != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="bad auth scheme",
+            )
+        user = await _authenticate_clerk(token, db, settings=settings)
 
-    if scheme_lower != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="bad auth scheme",
-        )
-    return await _authenticate_clerk(token, db, settings=settings)
+    # Stash on request state so slowapi's per-user key_func can read
+    # ``user.clerk_id`` without re-running this dependency.
+    request.state.user = user
+    return user

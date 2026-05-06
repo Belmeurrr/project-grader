@@ -74,7 +74,16 @@ async def db_session(_engine) -> AsyncIterator[AsyncSession]:
 
 @pytest_asyncio.fixture
 async def app(db_session: AsyncSession) -> AsyncIterator[FastAPI]:
-    """FastAPI app with the DB dependency overridden to use the test session."""
+    """FastAPI app with the DB dependency overridden to use the test session.
+
+    Also resets the slowapi limiter's in-memory storage between tests
+    so a noisy test doesn't poison the per-user / per-IP buckets for
+    its successor. The limiter is a module-level singleton; tests
+    that don't explicitly assert on rate limits should never see 429s
+    from prior runs."""
+    from grader.services.rate_limit import limiter
+
+    limiter.reset()
     application = create_app()
 
     async def _override_get_db() -> AsyncIterator[AsyncSession]:

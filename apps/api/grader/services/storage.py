@@ -1,9 +1,15 @@
 """S3 storage service.
 
-Issues presigned PUT URLs that the client uses to upload shot images directly
+Issues presigned POST forms that the client uses to upload shot images directly
 to S3 (or MinIO in dev). The API never proxies image bytes — that would burn
 expensive Fargate CPU on data movement and add a synchronous round-trip to
 every capture step.
+
+POST (vs PUT) is used because the presigned-POST policy lets us pin a
+``content-length-range`` condition so a malicious client can't push a 5 GB
+upload through what we intended to be a ~25 MiB phone-photo. The signature
+covers the policy document, so S3 enforces the size cap server-side regardless
+of what the client claims.
 
 Key layout:
     submissions/<submission_id>/shots/<shot_id>/<kind>.<ext>
@@ -27,11 +33,19 @@ from grader.settings import get_settings
 
 
 @dataclass(frozen=True)
-class PresignedPut:
-    upload_url: str
+class PresignedPost:
+    """Presigned POST form payload for direct browser → S3 uploads.
+
+    ``url`` is the bucket endpoint; ``fields`` is the multipart-form
+    dictionary the client must POST verbatim, with the file blob added
+    last under the field name ``file``. The signature covers the
+    embedded policy document, which pins the ``content-length-range``
+    bounds — S3 rejects oversized uploads server-side."""
+
+    url: str
+    fields: dict[str, str]
     s3_key: str
     expires_at: datetime
-    required_headers: dict[str, str]
 
 
 _CONTENT_TYPE_TO_EXT = {
@@ -79,35 +93,39 @@ def reset_s3_client_cache() -> None:
     _s3_client.cache_clear()
 
 
-def presigned_put_for_shot(
+def presigned_post_for_shot(
     submission_id: uuid.UUID,
     shot_id: uuid.UUID,
     kind: str,
     content_type: str,
-) -> PresignedPut:
-    """Generate a presigned PUT URL for direct client → S3 upload.
+) -> PresignedPost:
+    """Generate a presigned POST form for direct client → S3 upload.
 
-    The returned `required_headers` MUST be set verbatim by the client on the
-    PUT — they're part of the signature."""
+    A ``content-length-range`` condition is baked into the policy and
+    signed alongside it: S3 rejects any upload smaller than 1 byte or
+    larger than ``settings.submission_max_image_bytes``. Without this
+    a client holding a presigned URL could PUT an arbitrarily large
+    object to our bucket. ``register_shot`` applies a defense-in-depth
+    HEAD check on the same setting after the upload completes."""
     settings = get_settings()
     key = shot_s3_key(submission_id, shot_id, kind, content_type)
     ttl = settings.s3_presigned_url_ttl_seconds
 
-    url = _s3_client().generate_presigned_url(
-        ClientMethod="put_object",
-        Params={
-            "Bucket": settings.s3_bucket,
-            "Key": key,
-            "ContentType": content_type,
-        },
+    response = _s3_client().generate_presigned_post(
+        Bucket=settings.s3_bucket,
+        Key=key,
+        Fields={"Content-Type": content_type},
+        Conditions=[
+            ["content-length-range", 1, settings.submission_max_image_bytes],
+            {"Content-Type": content_type},
+        ],
         ExpiresIn=ttl,
-        HttpMethod="PUT",
     )
-    return PresignedPut(
-        upload_url=url,
+    return PresignedPost(
+        url=response["url"],
+        fields=response["fields"],
         s3_key=key,
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
-        required_headers={"Content-Type": content_type},
     )
 
 

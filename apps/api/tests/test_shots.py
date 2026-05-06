@@ -103,6 +103,89 @@ async def test_upload_url_404_for_other_users_submission(
 
 
 @pytest.mark.asyncio
+async def test_upload_url_response_is_presigned_post_form(
+    client: httpx.AsyncClient, auth_headers: dict[str, str], s3_bucket: str
+) -> None:
+    """The endpoint must return the presigned-POST shape (``url`` +
+    ``fields``) rather than the legacy presigned-PUT URL. The
+    ``fields`` dict must contain a signed policy whose
+    ``content-length-range`` condition matches our configured cap."""
+    import base64
+    import json as _json
+
+    from grader.settings import get_settings
+
+    sid = await _create_submission(client, auth_headers)
+    upload = await _request_upload(client, auth_headers, sid)
+
+    # New POST-shaped payload.
+    assert "url" in upload
+    assert "fields" in upload
+    assert "shot_id" in upload
+    assert "s3_key" in upload
+    # Legacy fields removed.
+    assert "upload_url" not in upload
+    assert "required_headers" not in upload
+
+    fields = upload["fields"]
+    assert isinstance(fields, dict)
+    assert fields["Content-Type"] == "image/jpeg"
+    assert fields["key"] == upload["s3_key"]
+    assert "policy" in fields
+    assert "x-amz-signature" in fields
+
+    # The size cap is in the signed policy.
+    policy = _json.loads(base64.b64decode(fields["policy"]).decode("utf-8"))
+    range_cond = next(
+        (c for c in policy["conditions"]
+         if isinstance(c, list) and c and c[0] == "content-length-range"),
+        None,
+    )
+    assert range_cond is not None
+    assert range_cond[1] == 1
+    assert range_cond[2] == get_settings().submission_max_image_bytes
+
+
+@pytest.mark.asyncio
+async def test_register_413_when_object_exceeds_size_cap(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    s3_bucket: str,
+) -> None:
+    """If a client somehow lands an object larger than the configured
+    cap (e.g. weak MinIO policy enforcement, an attacker bypassing
+    the form), the server-side HEAD check on register must reject it
+    with 413 before quality decoding spends CPU on a multi-GB blob."""
+    from unittest.mock import patch
+
+    sid = await _create_submission(client, auth_headers)
+    upload = await _request_upload(client, auth_headers, sid)
+    body = encode_jpeg(card_in_scene(fill=0.55))
+    _put_to_s3(s3_bucket, upload["s3_key"], body)
+
+    # Patch storage.head_shot to claim the object is way too big.
+    over_limit = 50 * 1024 * 1024 * 1024  # 50 GiB
+    with patch(
+        "grader.routers.submissions.storage.head_shot",
+        return_value={
+            "content_length": over_limit,
+            "content_type": "image/jpeg",
+            "etag": "fake-etag",
+        },
+    ):
+        r = await client.post(
+            f"/submissions/{sid}/shots",
+            headers=auth_headers,
+            json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        )
+    assert r.status_code == 413, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "upload_too_large"
+    assert detail["got_bytes"] == over_limit
+    assert detail["max_bytes"] > 0
+
+
+@pytest.mark.asyncio
 async def test_full_shot_flow_passes_quality(
     client: httpx.AsyncClient,
     auth_headers: dict[str, str],

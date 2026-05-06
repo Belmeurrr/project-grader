@@ -36,7 +36,8 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -49,6 +50,7 @@ from grader.schemas.submissions import (
     GradeOut,
     IdentifiedCard,
 )
+from grader.services.rate_limit import limiter
 
 router = APIRouter(prefix="/cert", tags=["cert"])
 
@@ -57,7 +59,9 @@ _PUBLIC_CACHE_HEADER = "public, max-age=300, stale-while-revalidate=3600"
 
 
 @router.get("/{submission_id}", response_model=CertificatePublic)
+@limiter.limit("60/minute")  # default key_func: per-IP. Public endpoint, no user context.
 async def get_certificate(
+    request: Request,
     submission_id: uuid.UUID,
     response: Response,
     db: AsyncSession = Depends(get_db),
@@ -71,10 +75,15 @@ async def get_certificate(
     Both 404s use the same opaque message so a probing client can't
     distinguish "doesn't exist" from "exists but isn't ready" — minor
     privacy benefit, no functional cost."""
-    submission = await db.get(
-        Submission,
-        submission_id,
-        options=[
+    # Use `select(...).options(...)` rather than `db.get(...,
+    # options=...)`: the SA-2.0.x release we ship silently drops the
+    # `options=` argument from `get(...)`, which leaves the
+    # relationships unloaded and crashes the cert builder with
+    # MissingGreenlet on the first attribute access.
+    result = await db.execute(
+        select(Submission)
+        .where(Submission.id == submission_id)
+        .options(
             selectinload(Submission.grades),
             selectinload(Submission.authenticity),
             # Chain through CardVariant → CardSet so we can render the
@@ -82,14 +91,9 @@ async def get_certificate(
             selectinload(Submission.identified_variant).selectinload(
                 CardVariant.set
             ),
-        ],
-        # `populate_existing=True` forces the eager-load options to apply
-        # even on identity-map hits — required when a caller (e.g. the
-        # test fixture or a worker) has just written the row in the same
-        # session, otherwise the selectinload chain is silently dropped
-        # and the response code lazy-loads under asyncpg → MissingGreenlet.
-        populate_existing=True,
+        )
     )
+    submission = result.scalar_one_or_none()
     if submission is None or submission.status != SubmissionStatus.COMPLETED:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

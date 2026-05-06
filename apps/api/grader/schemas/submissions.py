@@ -25,11 +25,21 @@ class ShotUploadUrlRequest(BaseModel):
 
 
 class ShotUploadUrlResponse(BaseModel):
+    """Presigned POST form for direct client → S3 upload.
+
+    The shape mirrors the AWS ``generate_presigned_post`` response: the
+    client constructs a ``multipart/form-data`` POST against ``url``
+    with every entry in ``fields`` set verbatim, then appends the file
+    blob under field name ``file`` (last). The signed policy embedded
+    in ``fields["policy"]`` includes a ``content-length-range``
+    condition that S3 enforces server-side, so an oversized upload is
+    rejected with 400 before any bytes hit our budget."""
+
     shot_id: uuid.UUID
-    upload_url: str
+    url: str
+    fields: dict[str, str]
     s3_key: str
     expires_at: datetime
-    required_headers: dict[str, str]
 
 
 class ShotRegisterRequest(BaseModel):
