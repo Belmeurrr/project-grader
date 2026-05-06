@@ -136,12 +136,21 @@ async def request_shot_upload_url(
     via HEAD as defense-in-depth."""
     await _load_owned_submission(submission_id, user, db)
     shot_id = uuid.uuid4()
-    presigned = storage.presigned_post_for_shot(
-        submission_id=submission_id,
-        shot_id=shot_id,
-        kind=payload.kind.value,
-        content_type=payload.content_type,
-    )
+    try:
+        presigned = storage.presigned_post_for_shot(
+            submission_id=submission_id,
+            shot_id=shot_id,
+            kind=payload.kind.value,
+            content_type=payload.content_type,
+        )
+    except storage.StoragePresignError:
+        # The S3 client itself is unhealthy (bad creds / bucket gone /
+        # network). Mirror the broker-failure shape from
+        # `submit_submission` so clients have a uniform retry path.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"reason": "storage_unavailable", "retry_after": 30},
+        )
     return ShotUploadUrlResponse(
         shot_id=shot_id,
         url=presigned.url,
@@ -187,16 +196,19 @@ async def register_shot(
             detail="shot already registered",
         )
 
-    kind_str = payload.s3_key[len(expected_prefix) :].split(".", 1)[0]
-    try:
-        from grader.db.models import ShotKind
-
-        kind = ShotKind(kind_str)
-    except ValueError:
+    # The kind in the request body is the source of truth for what the
+    # client claims this shot is. We re-derive the kind embedded in the
+    # s3_key (via the standard ``<kind>.<ext>`` filename layout) and
+    # reject any mismatch. Without this, a client could mix
+    # ``shot_id`` from one presign with the ``s3_key`` from another and
+    # land a row whose ``kind`` column disagreed with the uploaded blob.
+    key_kind_str = payload.s3_key[len(expected_prefix) :].split(".", 1)[0]
+    if key_kind_str != payload.kind.value:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"unrecognized shot kind in key: {kind_str}",
+            detail="kind does not match the s3_key path",
         )
+    kind = payload.kind
 
     # Defense-in-depth on the upload size cap. The presigned-POST policy
     # already pins ``content-length-range``, so a well-behaved S3 / MinIO

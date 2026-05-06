@@ -17,7 +17,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,13 +41,17 @@ class IdentificationFailedError(Exception):
     pass
 
 
-def load_canonical_bgr(s3_key: str) -> np.ndarray:
-    raw = storage.get_shot_bytes(s3_key)
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if image is None or image.size == 0:
-        raise IdentificationFailedError(f"could not decode {s3_key}")
-    return image
+def _load_canonical_bgr(s3_key: str) -> np.ndarray:
+    """Service-typed wrapper around storage.load_canonical_bgr.
+
+    Catches the storage-level CanonicalLoadError and re-raises as an
+    IdentificationFailedError so the grading worker can route load
+    failures the same as identification failures (matches the pattern
+    used by services/grading.py and services/counterfeit.py)."""
+    try:
+        return storage.load_canonical_bgr(s3_key)
+    except storage.CanonicalLoadError as e:
+        raise IdentificationFailedError(str(e)) from e
 
 
 async def identify_canonical_for_submission(
@@ -64,7 +67,7 @@ async def identify_canonical_for_submission(
     grading pipeline batches several DB writes in a single transaction
     around this call (audit log, submission update, downstream stage
     inputs)."""
-    image = load_canonical_bgr(canonical_s3_key)
+    image = _load_canonical_bgr(canonical_s3_key)
     result = identify(image, catalog=catalog, embedder=embedder)
 
     submission = await db.get(Submission, submission_id)

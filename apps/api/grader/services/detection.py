@@ -13,6 +13,7 @@ JPEGs from the original capture.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import cv2
@@ -38,6 +39,29 @@ class DetectAndDewarpResult:
 
 class DetectionFailedError(Exception):
     """No card found, or fill / irregularity outside acceptable range."""
+
+
+# Shot keys are produced by ``storage.shot_s3_key`` as
+# ``submissions/<uuid>/shots/<shot_uuid>/<kind>.<ext>``. We anchor on the
+# leading ``submissions/<uuid>/`` segment because that's the only piece
+# detection cares about — the rest is opaque to this service.
+_SHOT_KEY_SUBMISSION_ID_RE = re.compile(
+    r"^submissions/(?P<id>[0-9a-fA-F-]{36})/"
+)
+
+
+def _submission_id_from_s3_key(s3_key: str) -> str:
+    """Extract the submission id from a shot's S3 key.
+
+    Raises DetectionFailedError if the key doesn't match the expected
+    layout. Replaces an earlier ``s3_key.split("/")[1]`` that worked
+    only by convention and silently mis-parsed any malformed key."""
+    match = _SHOT_KEY_SUBMISSION_ID_RE.match(s3_key)
+    if match is None:
+        raise DetectionFailedError(
+            f"s3_key does not match expected layout 'submissions/<uuid>/...': {s3_key}"
+        )
+    return match.group("id")
 
 
 def _canonical_s3_key(submission_id: str, shot_kind: ShotKind) -> str:
@@ -82,7 +106,7 @@ def detect_and_dewarp_shot(
         )
 
     settings = get_settings()
-    submission_id = s3_key.split("/")[1]
+    submission_id = _submission_id_from_s3_key(s3_key)
     canonical_key = _canonical_s3_key(submission_id, shot_kind)
 
     if persist_canonical:

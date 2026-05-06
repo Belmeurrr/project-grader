@@ -111,3 +111,20 @@ def test_detect_and_dewarp_rejects_bent_card(s3_bucket: str) -> None:
     key, kind = _put_shot(s3_bucket, sid, skewed)
     with pytest.raises(detection.DetectionFailedError, match="irregular|too steep|bent"):
         detection.detect_and_dewarp_shot(key, kind, max_irregularity=0.05)
+
+
+def test_submission_id_from_s3_key_extracts_uuid() -> None:
+    """The regex must accept the canonical layout produced by
+    ``storage.shot_s3_key``."""
+    sid = uuid.uuid4()
+    key = f"submissions/{sid}/shots/{uuid.uuid4()}/front_full.jpg"
+    assert detection._submission_id_from_s3_key(key) == str(sid)
+
+
+def test_submission_id_from_s3_key_rejects_malformed() -> None:
+    """A key that doesn't start with ``submissions/<uuid>/`` must
+    raise rather than silently mis-parse via index."""
+    with pytest.raises(detection.DetectionFailedError, match="layout"):
+        detection._submission_id_from_s3_key("not-a-prefix/abc/foo.jpg")
+    with pytest.raises(detection.DetectionFailedError, match="layout"):
+        detection._submission_id_from_s3_key("submissions/not-a-uuid/shots/x/front_full.jpg")

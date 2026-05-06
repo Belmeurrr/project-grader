@@ -102,6 +102,29 @@ def test_head_shot_returns_none_for_missing_object(s3_bucket: str) -> None:
     assert storage.head_shot("submissions/missing/shots/missing/front_full.jpg") is None
 
 
+def test_presigned_post_for_shot_wraps_client_error_as_typed(s3_bucket: str) -> None:
+    """When the underlying S3 client raises a ClientError (bad creds /
+    bucket gone / network hiccup), the storage layer should surface a
+    typed ``StoragePresignError`` instead of a raw boto3 exception so
+    the route handler can map it to a uniform 503."""
+    from unittest.mock import patch
+
+    from botocore.exceptions import ClientError
+
+    sub = uuid.uuid4()
+    shot = uuid.uuid4()
+
+    fake_error = ClientError(
+        error_response={"Error": {"Code": "NoSuchBucket", "Message": "bucket gone"}},
+        operation_name="PutObject",
+    )
+
+    client = storage._s3_client()
+    with patch.object(client, "generate_presigned_post", side_effect=fake_error):
+        with pytest.raises(storage.StoragePresignError):
+            storage.presigned_post_for_shot(sub, shot, "front_full", "image/jpeg")
+
+
 def test_head_and_get_after_put(s3_bucket: str) -> None:
     sub = uuid.uuid4()
     shot = uuid.uuid4()

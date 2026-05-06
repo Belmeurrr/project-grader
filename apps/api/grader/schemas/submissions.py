@@ -106,6 +106,12 @@ class ShotUploadUrlResponse(BaseModel):
 class ShotRegisterRequest(BaseModel):
     shot_id: uuid.UUID
     s3_key: str
+    # ``kind`` is required and validated to match the kind that was
+    # presigned for this s3_key. Inferring it from the key path alone
+    # let a client mix shot_ids/keys across two presigns and end up
+    # with a row whose ``kind`` column doesn't reflect the upload — see
+    # the kind-spoofing test in test_shots.py.
+    kind: ShotKind
 
 
 class ShotOut(BaseModel):

@@ -276,12 +276,18 @@ export async function registerShot(
   submissionId: string,
   shotId: string,
   s3Key: string,
+  kind: ShotKind,
 ): Promise<ShotOut> {
   const res = await authedFetch(
     `/submissions/${encodeURIComponent(submissionId)}/shots`,
     {
       method: "POST",
-      body: JSON.stringify({ shot_id: shotId, s3_key: s3Key }),
+      // ``kind`` is sent in the body so the server can verify it
+      // matches the kind embedded in ``s3Key`` — defends against a
+      // client mixing shot_id/s3_key from two different presigns to
+      // mislabel an upload's kind. See server-side
+      // ``register_shot``.
+      body: JSON.stringify({ shot_id: shotId, s3_key: s3Key, kind }),
     },
   );
   return asJson<ShotOut>(res);
@@ -331,6 +337,7 @@ export async function uploadShot(
     submissionId,
     presigned.shot_id,
     presigned.s3_key,
+    kind,
   );
 }
 

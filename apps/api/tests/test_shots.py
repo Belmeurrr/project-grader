@@ -180,7 +180,11 @@ async def test_register_413_when_object_exceeds_size_cap(
         r = await client.post(
             f"/submissions/{sid}/shots",
             headers=auth_headers,
-            json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+            json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
         )
     assert r.status_code == 413, r.text
     detail = r.json()["detail"]
@@ -203,7 +207,11 @@ async def test_full_shot_flow_passes_quality(
     r = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert r.status_code == 201, r.text
     body = r.json()
@@ -226,7 +234,11 @@ async def test_blurry_shot_records_failure(
     r = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert r.status_code == 201, r.text
     body = r.json()
@@ -249,7 +261,11 @@ async def test_glary_shot_records_failure(
     r = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert r.status_code == 201
     assert r.json()["quality_passed"] is False
@@ -268,7 +284,11 @@ async def test_register_400_when_s3_object_missing(
     r = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert r.status_code == 400
     assert "not found" in r.json()["detail"].lower()
@@ -286,7 +306,11 @@ async def test_register_400_when_bytes_are_not_an_image(
     r = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert r.status_code == 400
     assert "decodable" in r.json()["detail"].lower()
@@ -326,16 +350,60 @@ async def test_register_409_on_duplicate_shot_id(
     first = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert first.status_code == 201
 
     second = await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
     assert second.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_register_400_when_kind_disagrees_with_s3_key(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    s3_bucket: str,
+) -> None:
+    """Kind-spoofing defense.
+
+    Two presigns: one for ``front_full``, one for ``back_full``. Both
+    objects land in S3. The client then attempts to register the
+    front_full shot with ``kind=back_full`` (or vice versa) — using
+    the matching shot_id+s3_key from one presign while lying about
+    the kind in the body. The server must reject the inconsistent
+    pair before any row is written."""
+    sid = await _create_submission(client, auth_headers)
+
+    front = await _request_upload(client, auth_headers, sid, kind="front_full")
+    back = await _request_upload(client, auth_headers, sid, kind="back_full")
+    body = encode_jpeg(card_in_scene(fill=0.55))
+    _put_to_s3(s3_bucket, front["s3_key"], body)
+    _put_to_s3(s3_bucket, back["s3_key"], body)
+
+    # Try to register the front_full upload while claiming kind=back_full.
+    r = await client.post(
+        f"/submissions/{sid}/shots",
+        headers=auth_headers,
+        json={
+            "shot_id": front["shot_id"],
+            "s3_key": front["s3_key"],
+            "kind": "back_full",
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "kind" in r.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -354,7 +422,11 @@ async def test_first_shot_advances_submission_to_capturing(
     await client.post(
         f"/submissions/{sid}/shots",
         headers=auth_headers,
-        json={"shot_id": upload["shot_id"], "s3_key": upload["s3_key"]},
+        json={
+            "shot_id": upload["shot_id"],
+            "s3_key": upload["s3_key"],
+            "kind": "front_full",
+        },
     )
 
     sub_after = (await client.get(f"/submissions/{sid}", headers=auth_headers)).json()

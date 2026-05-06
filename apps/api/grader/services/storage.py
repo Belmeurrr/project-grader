@@ -20,6 +20,7 @@ audit when a user retakes a borderline shot."""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,9 +28,21 @@ from functools import lru_cache
 
 import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from grader.settings import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+class StoragePresignError(Exception):
+    """Raised when presigned-URL generation fails because the S3 client
+    itself is unhealthy (bad credentials, missing bucket, network).
+
+    Distinct from a successful presign whose URL later 403s on PUT —
+    that's a bucket policy / CORS issue, not something we can detect
+    here. Route handlers should map this to 503 with a retry hint, the
+    same shape as broker-failure handling in submit_submission."""
 
 
 @dataclass(frozen=True)
@@ -111,16 +124,37 @@ def presigned_post_for_shot(
     key = shot_s3_key(submission_id, shot_id, kind, content_type)
     ttl = settings.s3_presigned_url_ttl_seconds
 
-    response = _s3_client().generate_presigned_post(
-        Bucket=settings.s3_bucket,
-        Key=key,
-        Fields={"Content-Type": content_type},
-        Conditions=[
-            ["content-length-range", 1, settings.submission_max_image_bytes],
-            {"Content-Type": content_type},
-        ],
-        ExpiresIn=ttl,
-    )
+    # ``generate_presigned_post`` happily returns a URL even when AWS
+    # credentials are wrong or the bucket is gone — the breakage only
+    # surfaces on the client's PUT as an opaque 403. Wrapping the call
+    # surfaces that earlier as a 503 with a retry hint.
+    try:
+        response = _s3_client().generate_presigned_post(
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Fields={"Content-Type": content_type},
+            Conditions=[
+                ["content-length-range", 1, settings.submission_max_image_bytes],
+                {"Content-Type": content_type},
+            ],
+            ExpiresIn=ttl,
+        )
+    except (ClientError, BotoCoreError) as e:
+        error_code = (
+            e.response.get("Error", {}).get("Code") if isinstance(e, ClientError) else None
+        )
+        logger.error(
+            "presigned_post_for_shot failed",
+            extra={
+                "operation": "generate_presigned_post",
+                "bucket": settings.s3_bucket,
+                "s3_key": key,
+                "error_code": error_code,
+            },
+        )
+        raise StoragePresignError(
+            f"could not presign upload for {key}: {e}"
+        ) from e
     return PresignedPost(
         url=response["url"],
         fields=response["fields"],
