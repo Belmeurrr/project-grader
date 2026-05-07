@@ -236,6 +236,24 @@ class CertAuthenticityPublic(BaseModel):
     detectors: list[DetectorScorePublic] = Field(default_factory=list)
 
 
+class PopulationStat(BaseModel):
+    """Population / chronology counter for a cert.
+
+    TAG-inspired scarcity stats: how many of THIS variant we've graded,
+    where this submission ranks by final grade among them, the highest
+    grade we've ever issued for the variant, and where this submission
+    sits in the chronological grading history. Computed on the fly from
+    the COMPLETED submissions for the same `identified_variant_id`; the
+    cert payload omits the field entirely (`population=None`) when the
+    submission has no identified variant — surfacing "1 of 1 graded" is
+    noise we'd rather skip."""
+
+    total_graded: int
+    this_rank: int
+    max_grade: float | None
+    chronological_index: int
+
+
 class CertificatePublic(BaseModel):
     """Public-cert view of a COMPLETED submission.
 
@@ -257,3 +275,7 @@ class CertificatePublic(BaseModel):
     # primary Grade row — see `_build_regions_for_grade` in
     # `grader.routers.cert`.
     regions: list[RegionScore] = Field(default_factory=list)
+    # Population / chronology counter. Null when the submission has no
+    # identified variant (no peer set to compute against). See
+    # `PopulationStat` and `_build_population_stat` in `grader.routers.cert`.
+    population: PopulationStat | None = None

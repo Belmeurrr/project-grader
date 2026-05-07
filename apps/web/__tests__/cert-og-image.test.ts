@@ -66,6 +66,7 @@ const FIXTURE: Certificate = {
     detectors: [],
   },
   regions: [],
+  population: null,
 };
 
 describe("buildCertOgData", () => {

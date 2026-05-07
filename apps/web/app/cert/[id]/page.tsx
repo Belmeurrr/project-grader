@@ -10,6 +10,8 @@
  * Twitter / pins to a marketplace listing / shares with a buyer.
  */
 
+import type { ReactNode } from "react";
+
 import { notFound } from "next/navigation";
 
 import {
@@ -17,6 +19,7 @@ import {
   type Certificate,
   type DetectorScore,
   type Grade,
+  type PopulationStat,
   type Region,
   type RegionSeverity,
   fetchCertificate,
@@ -129,17 +132,83 @@ export async function generateMetadata({
 
 function Header({ cert }: { cert: Certificate }) {
   return (
-    <header className="flex flex-col gap-2 border-b border-zinc-800 pb-6">
-      <p className="text-xs uppercase tracking-widest text-lime-500">
-        Project Grader • Certificate
-      </p>
-      <h1 className="font-mono text-lg break-all text-zinc-100">
-        {cert.cert_id}
-      </h1>
-      <p className="text-xs text-zinc-500">
-        Completed {new Date(cert.completed_at).toLocaleString()}
-      </p>
+    <header className="flex flex-col gap-4 border-b border-zinc-800 pb-6">
+      <div className="flex flex-col gap-2">
+        <p className="text-xs uppercase tracking-widest text-lime-500">
+          Project Grader • Certificate
+        </p>
+        <h1 className="font-mono text-lg break-all text-zinc-100">
+          {cert.cert_id}
+        </h1>
+        <p className="text-xs text-zinc-500">
+          Completed {new Date(cert.completed_at).toLocaleString()}
+        </p>
+      </div>
+      {cert.population && <PopulationCounter pop={cert.population} />}
     </header>
+  );
+}
+
+/**
+ * TAG-inspired pop / rank / chron counter.
+ *
+ * Three short stats stacked on mobile, three columns on desktop:
+ *   1. "1 of 47 graded" — the variant's population (the "of X" emphasized)
+ *   2. "#3 highest score" — this submission's rank by final grade
+ *   3. "#12 graded chronologically" — order in the grading history
+ *
+ * Hidden entirely when `cert.population === null` (handled by caller),
+ * which matches the API contract: no identified variant → no peer set
+ * → no scarcity signal to convey.
+ */
+function PopulationCounter({ pop }: { pop: PopulationStat }) {
+  return (
+    <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <PopulationCell
+        label="Population"
+        primary={
+          <>
+            1 of{" "}
+            <span className="text-zinc-100">{pop.total_graded}</span> graded
+          </>
+        }
+      />
+      <PopulationCell
+        label="Rank"
+        primary={
+          <>
+            <span className="text-zinc-100">#{pop.this_rank}</span> highest
+            score
+          </>
+        }
+      />
+      <PopulationCell
+        label="Chronology"
+        primary={
+          <>
+            <span className="text-zinc-100">#{pop.chronological_index}</span>{" "}
+            graded chronologically
+          </>
+        }
+      />
+    </dl>
+  );
+}
+
+function PopulationCell({
+  label,
+  primary,
+}: {
+  label: string;
+  primary: ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+      <dt className="text-[10px] uppercase tracking-widest text-zinc-500">
+        {label}
+      </dt>
+      <dd className="mt-1 text-sm text-zinc-300">{primary}</dd>
+    </div>
   );
 }
 

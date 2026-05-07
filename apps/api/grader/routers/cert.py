@@ -37,7 +37,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -49,6 +49,7 @@ from grader.schemas.submissions import (
     DetectorScorePublic,
     GradeOut,
     IdentifiedCard,
+    PopulationStat,
     RegionKind,
     RegionScore,
     RegionSeverity,
@@ -119,6 +120,8 @@ async def get_certificate(
     primary_grade = _primary_grade(submission)
     regions = _build_regions_for_grade(primary_grade) if primary_grade else []
 
+    population = await _build_population_stat(db, submission)
+
     response.headers["Cache-Control"] = _PUBLIC_CACHE_HEADER
     return CertificatePublic(
         cert_id=submission.id,
@@ -127,7 +130,84 @@ async def get_certificate(
         grades=grades,
         authenticity=auth,
         regions=regions,
+        population=population,
     )
+
+
+async def _build_population_stat(
+    db: AsyncSession, submission: Submission
+) -> PopulationStat | None:
+    """Compute the TAG-style pop/rank/chron counter for this submission.
+
+    Returns None when:
+      - the submission has no identified variant (no peer set)
+      - the submission's PSA grade row isn't found in the window result
+        (defensive — a COMPLETED submission with no PSA grade row would
+        already have returned `regions=[]` upstream; we don't want to
+        crash the cert page on that edge)
+
+    Otherwise computes via a single window-function query over all
+    COMPLETED submissions for the same `identified_variant_id`:
+
+      - `total_graded`   = COUNT(*) over the window
+      - `this_rank`      = RANK() over (ORDER BY g.final DESC NULLS LAST)
+      - `max_grade`      = MAX(g.final) over the window
+      - `chronological_index` = ROW_NUMBER() over (ORDER BY s.completed_at)
+
+    Then filters in Python to find the row matching this submission's id.
+    Pinned to `scheme = 'psa'` so rank/max are computed against the same
+    scheme the cert page leads with — mixing PSA + BGS finals would
+    double-count the same submission and produce nonsense ranks."""
+    if submission.identified_variant_id is None:
+        return None
+
+    # Cast string literals to the native PG enums so this works regardless
+    # of whether Alembic created the enum types with lowercase values
+    # ('completed') or SQLAlchemy's default uppercase names ('COMPLETED').
+    # Comparing s.status::text = 'completed' would work too, but the cast
+    # back to the enum keeps the comparison index-friendly.
+    sql = text(
+        """
+        SELECT
+            s.id AS submission_id,
+            COUNT(*) OVER () AS total_graded,
+            RANK() OVER (ORDER BY g.final DESC NULLS LAST) AS rank_by_grade,
+            MAX(g.final) OVER () AS max_grade,
+            ROW_NUMBER() OVER (ORDER BY s.completed_at) AS chronological_index
+        FROM submissions s
+        JOIN grades g ON g.submission_id = s.id
+        WHERE s.identified_variant_id = :variant_id
+          AND s.status::text = :completed_status
+          AND g.scheme::text = :psa_scheme
+        """
+    )
+    rows = (
+        await db.execute(
+            sql,
+            {
+                "variant_id": submission.identified_variant_id,
+                # SQLAlchemy `Enum(...)` on a plain enum.Enum stores the
+                # member NAME (uppercase), not the lowercase string value.
+                # Cast to text on the column side and compare uppercase.
+                "completed_status": SubmissionStatus.COMPLETED.name,
+                "psa_scheme": "PSA",
+            },
+        )
+    ).mappings().all()
+
+    for row in rows:
+        if row["submission_id"] == submission.id:
+            return PopulationStat(
+                total_graded=int(row["total_graded"]),
+                this_rank=int(row["rank_by_grade"]),
+                max_grade=(
+                    float(row["max_grade"])
+                    if row["max_grade"] is not None
+                    else None
+                ),
+                chronological_index=int(row["chronological_index"]),
+            )
+    return None
 
 
 def _primary_grade(submission: Submission) -> Grade | None:

@@ -102,6 +102,19 @@ export type Region = {
   reasons: string[];
 };
 
+/**
+ * TAG-style population / chronology counter. Mirrors `PopulationStat`
+ * in `apps/api/grader/schemas/submissions.py`. Null when the submission
+ * has no identified variant — we don't surface "1 of 1 graded" since
+ * that conveys no scarcity signal.
+ */
+export type PopulationStat = {
+  total_graded: number;
+  this_rank: number;
+  max_grade: number | null;
+  chronological_index: number;
+};
+
 export type Certificate = {
   cert_id: string;
   completed_at: string; // ISO8601
@@ -110,6 +123,8 @@ export type Certificate = {
   authenticity: CertAuthenticity | null;
   /** Damage-heatmap entries — additive to `grades`, not a replacement. */
   regions: Region[];
+  /** Pop counter — null when no identified variant. */
+  population: PopulationStat | null;
 };
 
 const apiBaseUrl = (): string => {

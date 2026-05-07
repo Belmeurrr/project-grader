@@ -13,7 +13,7 @@ endpoint MUST:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -373,6 +373,88 @@ async def test_cert_endpoint_sets_cache_control(
     cc = r.headers.get("Cache-Control", "")
     assert "public" in cc
     assert "max-age" in cc
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_returns_population_stat(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """Population / chronology counter: 5 COMPLETED submissions for the
+    same variant with grades 9.5/9.0/8.5/8.0/7.5. The cert for the
+    9.0-grade submission must report total_graded=5, this_rank=2,
+    max_grade=9.5, chronological_index matches insertion order (=2)."""
+    user = User(
+        clerk_id=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@x",
+    )
+    db_session.add(user)
+    await db_session.flush()
+
+    card_set = CardSet(game=Game.POKEMON, code="POP", name="Pop Test Set")
+    db_session.add(card_set)
+    await db_session.flush()
+    variant = CardVariant(
+        game=Game.POKEMON,
+        set_id=card_set.id,
+        card_number="001",
+        name="Population Test Card",
+    )
+    db_session.add(variant)
+    await db_session.flush()
+
+    # Insertion order = chronological order via increasing completed_at.
+    # Grades intentionally NOT sorted by completed_at so rank-by-grade
+    # and chronological_index decouple cleanly.
+    base = datetime.now(timezone.utc)
+    grades_in_order = [9.5, 9.0, 8.5, 8.0, 7.5]
+    submission_ids: list[uuid.UUID] = []
+    for i, final in enumerate(grades_in_order):
+        sub = Submission(
+            user_id=user.id,
+            status=SubmissionStatus.COMPLETED,
+            completed_at=base + timedelta(minutes=i),
+            identified_variant_id=variant.id,
+            identification_confidence=0.9,
+        )
+        db_session.add(sub)
+        await db_session.flush()
+        grade = Grade(
+            submission_id=sub.id,
+            scheme=GradingScheme.PSA,
+            centering=final,
+            corners=final,
+            edges=final,
+            surface=final,
+            final=final,
+            confidence=0.85,
+        )
+        db_session.add(grade)
+        submission_ids.append(sub.id)
+    await db_session.flush()
+
+    # The 9.0-grade submission was inserted second (index 1).
+    target_id = submission_ids[1]
+    r = await client.get(f"/cert/{target_id}")
+    assert r.status_code == 200, r.text
+    pop = r.json()["population"]
+    assert pop is not None
+    assert pop["total_graded"] == 5
+    assert pop["this_rank"] == 2  # 9.5 is rank 1, 9.0 is rank 2
+    assert pop["max_grade"] == 9.5
+    assert pop["chronological_index"] == 2  # second insertion
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_population_null_when_unidentified(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """When the submission has no identified variant (catalog miss), the
+    population block is omitted entirely. We don't want to surface
+    "1 of 1 graded" — that's noise."""
+    sub = await _make_completed_submission(db_session)
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200
+    assert r.json()["population"] is None
 
 
 @pytest.mark.asyncio
