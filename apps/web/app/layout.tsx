@@ -14,12 +14,13 @@ export const metadata: Metadata = {
  * dev/test (we exit before calling getToken in lib/submission.ts). It
  * still renders children, so the unauth'd public cert page works.
  */
+const hasClerkKeys = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <ClerkProvider>
-      <html lang="en">
-        <body className="min-h-screen antialiased">{children}</body>
-      </html>
-    </ClerkProvider>
+  const tree = (
+    <html lang="en">
+      <body className="min-h-screen antialiased">{children}</body>
+    </html>
   );
+  return hasClerkKeys ? <ClerkProvider>{tree}</ClerkProvider> : tree;
 }
