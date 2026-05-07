@@ -60,145 +60,108 @@ Counterfeit ensemble is now **7/7 wired** end-to-end (FFT rosette + color profil
 
 ---
 
-## Now — do next (1 session each)
+## Scope (2026-05-06)
 
-- [ ] **First real corners trainer run** (when corpus crosses 200 samples)
-  - At current ingest rate (~30-50/day), expected ~3-5 days from 2026-04-29
-  - `cd ml && uv run python -m training.trainers.corners train.smoke_only=true train.epochs=2`
-  - Goal: prove the data pipeline plumbs through to a torch step. NOT "model converges" (corpus too small).
-  - Expected: `dataset.min_samples=200` gate passes; one mini-batch flows through the EfficientNet-V2-S backbone; checkpoint written to `outputs/corners/best.pt`
-  - First useful val signal needs ~1k samples (~3-4 weeks at free-tier rate, OR email `webcert@collectors.com` for paid tier).
-
-- [ ] **Recalibrate counterfeit thresholds** — four detectors now (rosette + color + embedding-anomaly + typography), all on synthetic-fixture / placeholder defaults
-  - Tool ships (`evaluation.counterfeit_recalibration`, 97e3f71); now covers typography too (4194511).
-  - Authentic-only mode usable today against `~/psa_data/scraped.jsonl`; two-sided mode unlocks once a `--csv` of counterfeits is sourced.
-  - Remaining work is operational: source the counterfeit slice (manual curation or a small purchase set), run the tool, paste the patch, lock + version in `model_versions`. Benchmark harness (`python -m evaluation.counterfeit_benchmark`) is the regression gate.
-
-- [ ] **Identification trainer — first real training run**
-  - Sampler now produces same-name+set / different-cert positives (commit ece3c94) — supervised metric learning is unblocked.
-  - Needs sufficient PSA-identified samples per (name, set) key; current corpus may have many singletons that get dropped. Run a smoke train (`train.smoke_only=true`) to confirm wiring, then real training as the corpus matures.
-
-- [ ] **Surface trainer — labeled defect masks**
-  - The trainer is real; the only stub is `all_background_mask_loader` returning `None`. ~100 manually-painted defect masks (LabelMe / CVAT) on the highest-defect-grade certs would unblock real training. Drop-in `mask_loader` reads `<image>.mask.png` next to `front_image_path`.
-
-- [ ] **Detection trainer — first real training run**
-  - `build_detection_manifest.py` already produces synthesized cards-in-scene with perfect bboxes. The dataset YAML's `path:` is `PLACEHOLDER_REGENERATE_VIA_BUILD_SCRIPT`. Smallest unblock: regenerate via the build script then `python -m training.trainers.detection`.
-
-### TAG-inspired cert page enhancements (post-research, 2026-05-06)
-
-After deep research on TAG Grading's DIG report (commit 6c4ecef shipped the share-infra layer — OG meta, QR, print, confidence band, review-request stub). These four are what's left from that backlog, ranked by the agent's recommended priority.
-
-- [x] **DINGS-style itemized defect rationale** — shipped 2026-05-06 (ea5206c). `<DefectList>` component beneath `<DamageHeatmap>` on the cert page; heuristic stand-in rationale strings keyed off (kind, severity), TODO points to richer per-defect outputs replacing them once trainer outputs ship. Tests: 13 API + 14 web pass.
-- [x] **Population "1 of N" counter** — shipped 2026-05-06 (de1799e). Folded into `CertificatePublic.population` (single fetch). Window-function SQL query computes total_graded, this_rank, max_grade, chronological_index in one pass over COMPLETED submissions for the same variant. Rendered as a 3-column `<dl>` in `<Header>` (stacks on mobile). Hides entirely when `identified_card is None` (no peer set → no "1 of 1" noise).
-- [x] **Card Vision opacity slider** — shipped 2026-05-06 (77e61b4). 1-hour presigned-GET URLs for canonical front + optional flash + tilt added to cert payload (cache header dropped to 40min max-age, no SWR, so CDN never serves a stale presign). `<CardVisionSlider>` client component crossfades between standard + flash with a range input + `aria-valuetext` for screen readers. Falls back to single-image render when only front exists, or to placeholder when no canonicals.
-
-- [ ] **eBay sold-listings comp widget on the cert** (L — defer to dedicated session)
-  - TAG and PSA don't surface comp sales on the cert; would be a major differentiator.
-  - Requires: eBay Browse / Marketplace Insights API integration in apps/api, a cached lookup keyed on `(name, set, card_number, grade)`, rate-limit + auth handling.
-  - 130point licensing decision is a parallel concern (audit noted).
-  - Larger scope; needs its own design session before implementation.
+**Personal-use project**, not a commercial SaaS. The user is grading their own cards through this system — no paying customers, no marketplace, no scaling pressure. Items are weighted by *"does this make the grader more accurate / reliable / usable for one person grading their own cards"* rather than commercial fit. See `~/.claude/projects/.../memory/project_personal_use.md`.
 
 ---
 
-## Soon — needs your input (sit-with-me sessions)
+## Now — code-tractable, high personal utility
 
-- [ ] **Terraform dev environment**
-  - File: `infra/terraform/envs/dev/main.tf`
-  - Needs your AWS account ID, region, naming convention, IAM strategy
-  - Resources: S3 bucket, Aurora Postgres + pgvector, ElastiCache Redis, ECR for Docker images, IAM roles
-  - Don't deploy real infrastructure on autopilot
+- [ ] **TCGplayer pricing comps on the cert** (M)
+  - Free-tier API, simpler than eBay. Shows current market price for the identified variant on the cert page.
+  - Lookup keyed on `(IdentifiedCard.{set, number, name}, primary.final)` → pulls "current market price" + maybe "median price by grade." Cache aggressively (24-hour TTL — these don't move that fast).
+  - Adds a `<PricingSection>` component on the cert page beneath the population stat. Hide entirely when `identified_card is None` (no card to price) or when the API call fails (graceful degrade).
+  - Useful for personal use: knowing "this Pikachu V is worth $X at PSA 9" is the whole point of grading your own collection.
 
-- [ ] **Decide policy on JWT email-claim updates**
-  - Current behavior: `User.email` is NOT overwritten on re-login if Clerk's JWT carries a different email
-  - Has GDPR/consent angle — worth a deliberate decision
-  - One-line fix in `_get_or_create_user` in [services/auth.py](apps/api/grader/services/auth.py) once decided
-
-- [ ] **Reference-embeddings deployment path** — where does the npz live in prod?
-  - Local-disk default works fine for dev (`~/manufacturer_refs/reference_embeddings.npz`).
-  - In prod the API workers + Celery workers all need read access. Options: (a) bake into the Docker image (~100 MB at 25k variants × 768 floats), (b) S3 + boot-time download to a shared volume, (c) S3 + per-call lazy download with LRU cache, (d) FAISS index + a sidecar service.
-  - Pick when API is being containerized for real (currently only docker-compose dev).
-
-- [ ] **"Preliminary final grade" stance**
-  - `apps/api/grader/services/grading.py:154-169` — `compute_psa_final` returns `None` if any of (centering, corners, edges, surface) is missing. Corners + surface are skeletons → **every Phase-1 cert renders without a final grade by design**.
-  - Correct philosophy ("never fabricate a grade we can't justify") but a real product implication.
-  - Decision: ship a labeled `min(centering, edges)` "preliminary" with caveat, OR hold the partial-grade UX line until corners + surface land.
-
-- [ ] **PSA paid API tier**
-  - Free is 100 calls/day; once that becomes the bottleneck on corpus growth, email `webcert@collectors.com` to upgrade. Mostly a calendar-time decision driven by training-corpus size hitting ceilings.
+- [ ] **Capture-guidance tuning** (S, ongoing)
+  - You're the test user — walk a few of your own cards through the wizard, log retakes and rejections. If quality gates feel too aggressive (or too lax), tune `THRESHOLDS_BY_SHOT` in `ml/pipelines/quality/report.py`. Pure operational work; pairs with running real grades on real cards.
 
 ---
 
-## Blocked on data accumulation (PSA daily ingest is running)
+## Soon — operational / data-bound
 
-- [ ] **Corners ML model — real training** — Skeleton committed (8ea54b4). Refuses to train below 200 samples; expected to cross threshold ~3-5 days from 2026-04-29. First useful val signal needs ~1k samples.
-- [ ] **Surface ML model — real training** — Skeleton committed (31b7adb). Hardest model in the system. Needs flash-shot data (currently unavailable) + per-defect-class labels (currently unlabeled). Default `mask_loader` returns all-background placeholder masks for the skeleton; swap in a real loader once labels exist.
-- [ ] **Identification (DinoV2) trainer — real training** — Skeleton committed (41e68f2 / cd7a7f0). Triplet loss with augmentation-based positives (anchor + positive = same image, two different transforms). Real training needs string-matched-positive sampling once we have variant_id linkage between PSA records and the catalog. ViT-B/14 patch constraint: `image_size` must be a multiple of 14.
-- [ ] **Detection (YOLOv11-seg) — real training** — Trainer + config exist (45fd695); manifest builder shipped (09fe2a4) producing labeled scenes from `card_in_scene` fixtures. Real training would mix synthetic + real-scene labels; the manifest builder is ready for that. CLI: `python -m scripts.build_detection_manifest --out-dir ... --n-train ... --n-val ...`.
+- [ ] **Mac-side daily flywheel ops** (S, queued)
+  - On the Mac prod box: `launchctl unload && cp && launchctl load` the new 4-step plist. Then `pip install --user 'rapidocr-onnxruntime>=1.4'` so the typography detector fires instead of UNVERIFIED-abstaining. Smoke-test via `launchctl start com.projectgrader.psa-ingest`; watch `~/psa_data/launchd.stdout.log` for per-step rc lines.
+  - Without this, the daily flywheel doesn't pick up the catalog DB sync or the substrate / typography detector deps. Everything else depends on it.
 
----
+- [ ] **Counterfeit recalibration with real labeled corpus** (operational, blocked on you)
+  - Tool ships (`evaluation.counterfeit_recalibration`); now covers all 7 detectors. Authentic-only mode usable today against `~/psa_data/scraped.jsonl`; two-sided mode unlocks once you supply a `--csv` of counterfeits.
+  - For personal use: as you grade your own collection, your authentic exemplars accumulate. If you also get a few cheap fakes from eBay (or use known-counterfeit images from forums), you can flip to two-sided mode and lock real thresholds.
+  - Run, paste the patch into `ml/pipelines/counterfeit/ensemble.py`, lock + version in `model_versions`.
 
-## Blocked on other work
-
-- [ ] **Typography counterfeit detector** (ensemble #5) — needs PaddleOCR or similar (new dep). OCR + glyph-shape comparison to canonical font templates.
-- [ ] **Siamese reference detector** (ensemble #1) — would be trained off the same data feeding the DinoV2 trainer skeleton; effectively the same fine-tune with a different head. Consider folding into the identification trainer rather than building a separate one.
-
----
-
-## Later — Phase 1 MVP polish
-
-- [ ] **Stripe payments** — free 5/mo, $10/mo unlimited. Webhook handler for subscription lifecycle.
-- [ ] **TCGplayer pricing comps** — pull current market price on identified-variant. Show predicted-grade-adjusted EV (`Σ P(grade) × median_price(grade)`).
-- [ ] **Real production deploy** — Aurora Postgres, ElastiCache, ECS Fargate API, EKS GPU workers, Triton inference, MLflow registry. Build out via Terraform after dev env exists.
+- [ ] **Surface trainer — incremental defect-mask labeling** (S per card, accumulates)
+  - When you grade a card with visible scratches/dents, hand-paint a defect mask in LabelMe / CVAT and drop it next to the image as `<image>.mask.png`. The default `all_background_mask_loader` already accepts this drop-in. ~100 masks unblock real training; you don't have to do them all in one sitting.
 
 ---
 
-## Phase 2+ (out of MVP scope per the plan)
+## Calendar-blocked (PSA daily ingest is running, watch for thresholds)
 
-- [ ] **Mobile app** — React Native + Expo, on-device ML for capture guidance
-- [ ] **eBay sold-listings comps** — needs 130point licensing decision; eBay Marketplace Insights API integration
-- [ ] **Buy/sell marketplace** — built on top of identified+graded inventory
-- [ ] **Imaging kiosks at partner shops** — Phase 3 hardware. Custom rig, 4-6 cameras, controlled lighting, telecentric lens
-- [ ] **Full slabbing operation** — Phase 4. Facility, staff, slab line, E&O insurance
+- [ ] **Real corners trainer run** — needs corpus ≥ 200 samples. Current ingest rate ~30-50/day. Goal of the first run: prove the pipeline plumbs through to a torch step. Real val signal needs ~1k samples.
+- [ ] **Real identification trainer run** — needs sufficient (name, set) key coverage in PSA exemplars. The supervised positive sampler ships (commit ece3c94); just needs data.
+- [ ] **Real detection trainer first run** — operational, GPU + manifest regeneration via `build_detection_manifest.py`. Synthetic-only baseline before user-shot labeling.
+- [ ] **PSA paid API tier upgrade** — only if 100/day becomes a bottleneck. Email `webcert@collectors.com`.
+
+---
+
+## Sit-with-me decisions (no rush — personal use)
+
+- [ ] **Preliminary-grade UX stance** — currently the cert renders an amber "preliminary subgrades — final grade unavailable" banner when corners/surface haven't trained yet. Decide: ship `min(centering, edges)` as a labeled "preliminary final" or hold the line until all 4 trainers ship.
+- [ ] **JWT email-claim policy** — overwrite `User.email` on re-login or freeze on first-seen. GDPR angle is mostly moot for personal use, but worth a deliberate decision.
+- [ ] **`reference_embeddings.npz` deployment path** — local disk works fine on the Mac. Only matters when/if you self-host on AWS.
+
+---
+
+## Eventually — keep on the list, no rush
+
+- [ ] **Mobile app** — RN/Expo, on-device capture guidance. You shoot from your phone; the web wizard already works on mobile, but a native app would feel cleaner.
+- [ ] **eBay sold-listings comp widget on cert** (L) — needs eBay Browse / Marketplace Insights API + cache layer + 130point licensing decision. Bigger lift than TCGplayer; would be a major differentiator vs TAG/PSA but personal-use value is "nice-to-have."
+- [ ] **Terraform dev/prod env** — only needed if/when you decide to host the API somewhere other than your Mac. Currently docker-compose is sufficient.
+- [ ] **Latency SLO + Datadog dashboards** — Sentry covers personal-use observability needs. SLOs matter when paying customers are watching.
+- [ ] **Public accuracy benchmark** — only relevant if you decide to share grades publicly as a trust signal.
 
 ---
 
 ## Operational hygiene (continuous)
 
-- [x] **Counterfeit benchmark — v1 corpus + harness** (committed 6823e48). Run: `python -m evaluation.counterfeit_benchmark`. Current: 50-sample synthetic corpus, rosette 98% accuracy / color 100% / ensemble 98%. **Still TODO**: extend with embedding-anomaly cases (needs labeled identified-variant samples), swap in real images as the corpus grows, then add the hard CI gate (recall ≥ 90% / FPR ≤ 2%).
+- [x] **Counterfeit benchmark — v1 corpus + harness** (committed 6823e48). Run: `python -m evaluation.counterfeit_benchmark`. Current: 50-sample synthetic corpus, rosette 98% accuracy / color 100% / ensemble 98%. **Still TODO**: extend with embedding-anomaly cases (needs labeled identified-variant samples), swap in real images as the corpus grows.
 - [x] **Manufacturer reference re-embed cycle** — runs as step 2 of `ml/scripts/daily_cycle.sh` (faea7d6). Idempotent on `(manufacturer, variant_id)`; a no-op on days with no new ingest.
-- [ ] **Consolidate `_ML_ROOT = parents[4]/"ml"` sys.path bootstrap** — `services/{grading,identification,counterfeit}.py` and `workers/pipeline_runner.py` each repeat the same depth-counting block. Footgun on the first file move. Fix: a single helper module imported once, OR `uv add` the `ml` package in editable mode.
-- [ ] **GitHub Actions CI** — `uv sync && pytest` for `apps/api` and `ml`. Type-check + lint gates. Coverage tracking. Currently merges to `main` are ungated.
-- [ ] Public accuracy benchmark — predictions vs subsequent PSA grades, published monthly (trust-strategy item from plan).
-- [ ] Capture-guidance acceptance test — real users on mid-range phones; rejection rate and retakes/submission. Target <2 retakes median.
-- [ ] Latency SLO monitoring — p95 ≤ 20s, p99 ≤ 35s (Datadog dashboards + PagerDuty alerts).
+- [x] **GitHub Actions CI** — shipped (aacdf80). 3 jobs: ml, api-unit (with `requires_postgres` marker), web-typecheck.
+- [x] **Consolidate `_ML_ROOT` sys.path bootstrap** — shipped (287f04c) via uv editable install of `ml/` in `apps/api/pyproject.toml`.
+
+---
+
+## Dropped (per personal-use scope, 2026-05-06)
+
+- ~~Stripe payments~~ — no paying customers
+- ~~Marketplace surface~~ — not building a 2-sided market
+- ~~Imaging kiosks (Phase 3)~~ — single-user
+- ~~Full slabbing operation (Phase 4)~~ — single-user
+- ~~Formal SLO + PagerDuty~~ — Sentry covers solo use
+- ~~Multi-tenant rate-limit Redis backend~~ — in-memory slowapi is fine
+- ~~Public accuracy benchmark monthly publication~~ — only relevant if commercial
 
 ---
 
 ## Dependency graph for upcoming milestones
 
 ```
-Corpus ≥ 200 samples (~3-5 days from 2026-04-29)
-└─ First corners trainer end-to-end run (1 day)
-   └─ Surface + edges models improve (2-3 weeks real training)
+Daily flywheel running on Mac (ops, you)
+└─ PSA corpus grows + catalog DB-side sync runs
+   ├─ Corpus ≥ 200 samples → first real corners trainer run
+   ├─ (name, set) coverage → first real identification trainer run
+   └─ Per-variant exemplars accumulate → embedding-anomaly + k-NN reference confidence ramps
 
-Counterfeit slice sourced (~300 labeled cards)
-└─ Recalibration tool flips authentic-only → two-sided
-   └─ Lock thresholds + version in model_versions
+You source / label a counterfeit slice (operational)
+└─ Recalibration tool flips to two-sided mode
+   └─ Lock real thresholds across all 7 detectors
 
-Catalog DB-side ingest (2-3 days)
-└─ pgvector identification accuracy unlocked (no longer querying empty table)
+You hand-paint surface defect masks as you grade
+└─ Surface trainer flips from skeleton to real (incremental)
 
-Variant linkage (PSA records ↔ Scryfall/PokemonTCG, ~1 week, research-heavy)
-└─ DinoV2 supervised triplet loss → identification accuracy
-
-Clerk SDK swap (2 hours) + Stripe (3-4 days)
-└─ Real signups + monetization
-
-Terraform prod (1-2 weeks, AWS setup required)
-└─ Datadog + SLOs
-
-Flash-shot dataset + substrate detector (4-6 weeks, hardware-dependent)
-└─ 6/7 ensemble complete → ship MVP to beta
+(Independent code work)
+TCGplayer comps on the cert (M, ~2-3 days)
+Capture-guidance tuning (S, ongoing as you grade your own cards)
 ```
 
 ---
