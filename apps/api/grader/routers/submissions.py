@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -81,6 +81,38 @@ async def create_submission(
     )
     submission = result.scalar_one()
     return _to_out(submission)
+
+
+@router.get("", response_model=list[SubmissionOut])
+async def list_submissions(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[SubmissionOut]:
+    """List the authenticated user's submissions, newest first.
+
+    Returns full `SubmissionOut` payloads (including grades, identified
+    card, and authenticity) so the Workbench can render its dashboard
+    in a single request. Eager-loads relationships to avoid the
+    MissingGreenlet pitfall on asyncpg sessions.
+    """
+    result = await db.execute(
+        select(Submission)
+        .where(Submission.user_id == user.id)
+        .order_by(Submission.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+        .options(
+            selectinload(Submission.grades),
+            selectinload(Submission.authenticity),
+            selectinload(Submission.identified_variant).selectinload(
+                CardVariant.set
+            ),
+        )
+    )
+    rows = result.scalars().all()
+    return [_to_out(s) for s in rows]
 
 
 @router.get("/{submission_id}", response_model=SubmissionOut)

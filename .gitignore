@@ -81,3 +81,6 @@ override.tf.json
 
 # docker
 .dockerignore.local
+
+# design source bundles (extract to docs/design/ for the versioned copy)
+*.zip

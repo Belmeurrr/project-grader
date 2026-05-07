@@ -1,15 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* shared.css — global tokens + nav for every Project Grader page */
 
-/*
- * Design tokens — the Workbench aesthetic.
- *
- * Mirrored from docs/design/shared.css. CSS variables let the design's
- * inline-style components (which compose with `var(--lime)` etc.) coexist
- * with the rest of the Tailwind-styled app. Don't strip these without
- * reading docs/design/README.md first.
- */
 :root {
   --bg-0: #0a0a0a;
   --bg-1: #111112;
@@ -31,11 +21,6 @@
   --amber: #fbbf24;
   --rose: #fb7185;
   --cyan: #67e8f9;
-
-  /* Tailwind layer kept for components that haven't been ported */
-  --background: 12 12 14;
-  --foreground: 245 245 247;
-  --accent: 132 204 22;
 }
 
 * { box-sizing: border-box; }
@@ -43,20 +28,14 @@ html, body {
   margin: 0; padding: 0;
   background: var(--bg-0);
   color: var(--ink-1);
-  font-family: var(--font-geist-sans, 'Geist'), system-ui, -apple-system, sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, sans-serif;
   font-feature-settings: 'ss01','cv11';
   -webkit-font-smoothing: antialiased;
 }
 body { min-height: 100vh; }
 
-.mono {
-  font-family: var(--font-geist-mono, 'Geist Mono'), ui-monospace, monospace;
-  font-feature-settings: 'zero','ss01';
-}
-.serif {
-  font-family: var(--font-instrument-serif, 'Instrument Serif'), serif;
-  font-style: italic;
-}
+.mono { font-family: 'Geist Mono', ui-monospace, monospace; font-feature-settings: 'zero','ss01'; }
+.serif { font-family: 'Instrument Serif', serif; font-style: italic; }
 button { font-family: inherit; }
 a { color: inherit; text-decoration: none; }
 
@@ -89,7 +68,7 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: -0.01em;
 }
 .pg-nav-sub {
-  font-family: var(--font-geist-mono, 'Geist Mono'), ui-monospace, monospace;
+  font-family: 'Geist Mono', ui-monospace, monospace;
   font-size: 9px; color: var(--ink-3);
   letter-spacing: 0.18em; text-transform: uppercase;
 }
@@ -105,7 +84,6 @@ a { color: inherit; text-decoration: none; }
   background: rgba(190,242,100,0.08);
   color: var(--lime);
 }
-.pg-nav-link.disabled { opacity: 0.4; cursor: not-allowed; }
 .pg-nav-actions { display: flex; align-items: center; gap: 10px; }
 
 .pg-btn {
@@ -130,9 +108,10 @@ a { color: inherit; text-decoration: none; }
   border-color: rgba(251,113,133,0.25);
 }
 
+/* breadcrumb */
 .pg-crumbs {
   display: flex; align-items: center; gap: 8px;
-  font-family: var(--font-geist-mono, 'Geist Mono'), ui-monospace, monospace;
+  font-family: 'Geist Mono', ui-monospace, monospace;
   font-size: 10px; color: var(--ink-3);
   letter-spacing: 0.04em;
 }
@@ -140,8 +119,3 @@ a { color: inherit; text-decoration: none; }
 .pg-crumbs a:hover { color: var(--ink-1); }
 .pg-crumbs .sep { color: var(--ink-5); }
 .pg-crumbs .here { color: var(--ink-1); }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}

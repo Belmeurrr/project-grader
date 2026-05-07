@@ -116,58 +116,73 @@ const getDevAuthHeader = (): string => {
 };
 
 /**
- * Whether Clerk is configured at all. Used to decide between
- * `useAuth().getToken()` and the dev-mode fallback. Reading
- * `process.env.NEXT_PUBLIC_*` at module scope is fine — Next inlines
- * it at build time.
+ * Whether Clerk is configured. Inlined at build time by Next; the
+ * value is constant across all renders for a given build, which lets
+ * us pick a hook implementation at module load (see below) without
+ * violating React's rules of hooks.
  */
-const clerkConfigured = (): boolean =>
-  Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+const CLERK_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
 /**
- * React hook that returns an `authedFetch` bound to the current
- * Clerk session (or the dev-mode fallback). Must be called from a
- * client component; the returned `fetch` wrapper itself is plain
- * async, so passing it down to event handlers / effects is fine.
- *
- * In dev/test (no `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`), `useAuth()`
- * is still safe to call — `<ClerkProvider>` renders a no-op when
- * unconfigured — but we skip `getToken()` and emit the `Dev <id>`
- * header instead. This keeps tests/local dev working without
- * provisioning Clerk keys.
+ * Build a `Headers` object with Authorization + standard JSON headers.
+ * Shared by the Clerk and dev-mode hook implementations.
  */
-export function useAuthedFetch(): (
-  path: string,
-  init?: RequestInit,
-) => Promise<Response> {
-  // `useAuth` is always called (rules of hooks). When Clerk is
-  // unconfigured, `getToken` returns null and we drop into the
-  // dev-mode branch.
-  const { getToken } = useAuth();
+function buildHeaders(authHeader: string, init: RequestInit): Headers {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", authHeader);
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  headers.set("Accept", "application/json");
+  return headers;
+}
 
+type AuthedFetchFn = (path: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Dev-mode `authedFetch` — emits `Authorization: Dev <id>`. No Clerk
+ * provider required. Used when `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is
+ * unset (local dev / CI / tests). The FastAPI side accepts these
+ * headers when `settings.dev_auth_enabled = true`.
+ */
+function useDevAuthedFetch(): AuthedFetchFn {
+  return useCallback(async (path: string, init: RequestInit = {}) => {
+    const url = `${apiBaseUrl()}${path}`;
+    const headers = buildHeaders(getDevAuthHeader(), init);
+    return fetch(url, { ...init, headers });
+  }, []);
+}
+
+/**
+ * Clerk-bound `authedFetch` — calls `useAuth().getToken()` and emits
+ * `Authorization: Bearer <jwt>`. Falls back to the dev header if the
+ * token is null (signed out user mid-flow). Requires a `<ClerkProvider>`
+ * ancestor — which `app/layout.tsx` only mounts when the publishable
+ * key is set.
+ */
+function useClerkAuthedFetch(): AuthedFetchFn {
+  const { getToken } = useAuth();
   return useCallback(
     async (path: string, init: RequestInit = {}) => {
       const url = `${apiBaseUrl()}${path}`;
-      const headers = new Headers(init.headers);
-
-      let authHeader: string;
-      if (clerkConfigured()) {
-        const token = await getToken();
-        authHeader = token ? `Bearer ${token}` : getDevAuthHeader();
-      } else {
-        authHeader = getDevAuthHeader();
-      }
-      headers.set("Authorization", authHeader);
-
-      if (init.body && !headers.has("Content-Type")) {
-        headers.set("Content-Type", "application/json");
-      }
-      headers.set("Accept", "application/json");
+      const token = await getToken();
+      const authHeader = token ? `Bearer ${token}` : getDevAuthHeader();
+      const headers = buildHeaders(authHeader, init);
       return fetch(url, { ...init, headers });
     },
     [getToken],
   );
 }
+
+/**
+ * Picks the right hook at module-load based on the build-time Clerk
+ * configuration. Because `CLERK_CONFIGURED` is a build-time constant,
+ * the chosen hook is the same on every render of every component that
+ * uses it — rules of hooks remain satisfied.
+ */
+export const useAuthedFetch: () => AuthedFetchFn = CLERK_CONFIGURED
+  ? useClerkAuthedFetch
+  : useDevAuthedFetch;
 
 export type AuthedFetch = ReturnType<typeof useAuthedFetch>;
 
@@ -215,6 +230,53 @@ export async function getSubmission(
   const res = await authedFetch(`/submissions/${encodeURIComponent(id)}`);
   if (res.status === 404) return null;
   return asJson<SubmissionOut>(res);
+}
+
+/**
+ * Owner-side submission with grades + identified card + authenticity
+ * baked in. Mirrors the server's full `SubmissionOut` payload from
+ * `apps/api/grader/schemas/submissions.py`.
+ */
+export type SubmissionFull = {
+  id: string;
+  status: SubmissionStatus;
+  created_at: string;
+  completed_at: string | null;
+  rejection_reason: string | null;
+  identified_card: {
+    variant_id: string;
+    name: string;
+    set_code: string;
+    card_number: string;
+    confidence: number;
+  } | null;
+  grades: Array<{
+    scheme: "psa" | "bgs" | "trugrade";
+    centering: number | null;
+    corners: number | null;
+    edges: number | null;
+    surface: number | null;
+    final: number | null;
+    confidence: number;
+  }>;
+  authenticity: {
+    verdict: "authentic" | "suspicious" | "likely_counterfeit" | "unverified";
+    confidence: number;
+    reasons: string[];
+    detector_scores: Record<string, Record<string, unknown>>;
+  } | null;
+};
+
+export async function listSubmissions(
+  authedFetch: AuthedFetch,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<SubmissionFull[]> {
+  const params = new URLSearchParams();
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  const res = await authedFetch(`/submissions${qs ? `?${qs}` : ""}`);
+  return asJson<SubmissionFull[]>(res);
 }
 
 // --------------------------------------------------------------------------
