@@ -45,7 +45,7 @@ const FIXTURE: Certificate = {
   },
   grades: [
     {
-      scheme: "psa",
+      scheme: "psa" as const,
       centering: 9,
       corners: 8.5,
       edges: 8,
@@ -68,6 +68,7 @@ const FIXTURE: Certificate = {
   regions: [],
   population: null,
   images: null,
+  pricing: null,
 };
 
 describe("buildCertOgData", () => {

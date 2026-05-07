@@ -164,7 +164,7 @@ export default function WorkbenchPage() {
         const rows = await listSubmissions(authedFetch, { limit: 50 });
         if (!cancelled) {
           setData(rows);
-          if (rows.length > 0 && !selectedId) setSelectedId(rows[0].id);
+          if (rows[0] && !selectedId) setSelectedId(rows[0].id);
         }
       } catch (e) {
         if (!cancelled) {

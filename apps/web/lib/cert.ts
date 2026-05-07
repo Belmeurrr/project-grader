@@ -132,6 +132,28 @@ export type CertImage = {
   expires_at: string; // ISO8601
 };
 
+/**
+ * TCGplayer market-price comps. Mirrors `PricingPublic` in the API
+ * schema. Null on the cert payload when (a) the operator hasn't
+ * configured `tcgplayer_public_key`, (b) the variant wasn't
+ * identified, or (c) the lookup itself failed. Cert page hides the
+ * `<PricingSection>` block entirely when pricing is null.
+ *
+ * All numeric fields are nullable: TCGplayer returns null when no
+ * listings exist in that price tier (e.g. a card with no Direct
+ * listings has `direct_low_price_usd === null` while marketplace
+ * `low_price_usd` is still populated).
+ */
+export type Pricing = {
+  source: "tcgplayer";
+  fetched_at: string; // ISO8601
+  market_price_usd: number | null;
+  low_price_usd: number | null;
+  median_price_usd: number | null;
+  direct_low_price_usd: number | null;
+  product_url: string | null;
+};
+
 export type Certificate = {
   cert_id: string;
   completed_at: string; // ISO8601
@@ -144,6 +166,9 @@ export type Certificate = {
   population: PopulationStat | null;
   /** Presigned-GET URLs for the canonical images, or null when none exist. */
   images: CertImage | null;
+  /** TCGplayer market-price comps — null when no provider key, no
+   * identified card, or lookup failed. */
+  pricing: Pricing | null;
 };
 
 const apiBaseUrl = (): string => {

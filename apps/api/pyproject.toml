@@ -24,6 +24,7 @@ dependencies = [
   "opencv-python-headless>=4.10.0",
   "pillow>=11.0.0",
   "slowapi>=0.1.9",
+  "cachetools>=5.3",
   "grader-ml",
   "sentry-sdk[fastapi]>=2.59.0",
 ]

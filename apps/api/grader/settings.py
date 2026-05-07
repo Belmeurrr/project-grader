@@ -114,6 +114,27 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- TCGplayer pricing (opt-in) -----
+    # Public/private key pair for the TCGplayer Developer API. When unset
+    # (the default), the pricing service is a graceful no-op and the
+    # public cert page renders without a pricing block. Personal-use
+    # scope: the user opts in by setting these once locally.
+    tcgplayer_public_key: str | None = Field(
+        default=None,
+        description=(
+            "TCGplayer Developer API public_key (OAuth client_id). When unset, "
+            "`grader.services.pricing.service.fetch_pricing` returns None and "
+            "the cert page omits the pricing section entirely."
+        ),
+    )
+    tcgplayer_private_key: str | None = Field(
+        default=None,
+        description=(
+            "TCGplayer Developer API private_key (OAuth client_secret). Pairs "
+            "with `tcgplayer_public_key`."
+        ),
+    )
+
     @model_validator(mode="after")
     def _default_dev_auth_from_env(self) -> "Settings":
         # Compute a sane default for `dev_auth_enabled` based on `env` when the

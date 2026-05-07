@@ -81,7 +81,7 @@ beforeEach(() => {
 
 // --- Test ----------------------------------------------------------------
 
-import { Body } from "@/app/grade/[id]/page";
+import { Body } from "@/components/grade/Wizard";
 import type { SubmissionOut } from "@/lib/submission";
 
 describe("grade wizard happy path", () => {
@@ -109,21 +109,23 @@ describe("grade wizard happy path", () => {
       />,
     );
 
-    // 1. All eight wizard rows render. Labels come straight out of
-    // WIZARD_SHOTS in the page module — if anyone reorders or drops
-    // a shot, the assertion lights up.
+    // 1. All eight wizard rows render in the ShotRail. Labels come
+    // from WIZARD_SHOTS in `apps/web/components/grade/shots.ts` —
+    // if anyone reorders or drops a shot, the assertion lights up.
+    // The active shot's label also renders in the viewfinder header,
+    // so we use getAllByText and assert ≥1 match.
     const expectedLabels = [
       "Front",
       "Back",
-      "Top-left corner",
-      "Top-right corner",
-      "Bottom-right corner",
-      "Bottom-left corner",
       "Flash front",
-      "Tilt-back front",
+      "Tilt 30°",
+      "Corner TL",
+      "Corner TR",
+      "Corner BL",
+      "Corner BR",
     ];
     for (const label of expectedLabels) {
-      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.getAllByText(label).length).toBeGreaterThanOrEqual(1);
     }
 
     // 2. Submit button is disabled — front shot hasn't passed yet.

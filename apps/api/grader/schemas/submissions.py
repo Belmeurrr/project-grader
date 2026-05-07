@@ -274,6 +274,36 @@ class CertImagePublic(BaseModel):
     expires_at: datetime
 
 
+class PricingPublic(BaseModel):
+    """TCGplayer market-price comps for the identified card variant.
+
+    Surfaced on the public cert page as a comp block beneath the
+    population panel. Fields mirror what TCGplayer returns on the
+    pricing endpoint — every numeric field is nullable because their
+    API itself nullables the values when no listings are present in
+    that price tier (e.g. a card with no Direct listings has
+    ``direct_low_price_usd=None`` while the marketplace ``low_price_usd``
+    is still populated).
+
+    The whole block is omitted from the cert payload when:
+      - the operator hasn't configured ``tcgplayer_public_key``
+        (graceful no-op for personal-use without a key)
+      - the lookup failed (HTTP error, timeout, no product match)
+      - the variant wasn't identified (no name/set/number to look up)
+
+    ``fetched_at`` is the cache-fill timestamp, not request time. The
+    cert page renders an "Updated …" footnote off this so the user
+    can see when the comp data is stale."""
+
+    source: Literal["tcgplayer"] = "tcgplayer"
+    fetched_at: datetime
+    market_price_usd: float | None = None
+    low_price_usd: float | None = None
+    median_price_usd: float | None = None
+    direct_low_price_usd: float | None = None
+    product_url: str | None = None
+
+
 class CertificatePublic(BaseModel):
     """Public-cert view of a COMPLETED submission.
 
@@ -304,3 +334,9 @@ class CertificatePublic(BaseModel):
     # itself failed (S3 unhealthy, bad creds — best-effort degrade so
     # the cert page still renders the rest of the payload).
     images: CertImagePublic | None = None
+    # TCGplayer market-price comps. None when (a) operator hasn't set
+    # `tcgplayer_public_key` (graceful no-op for personal-use without
+    # an API key), (b) the variant wasn't identified (no name/set/number
+    # to look up), or (c) the lookup itself failed. Cert page hides the
+    # block entirely on None.
+    pricing: PricingPublic | None = None

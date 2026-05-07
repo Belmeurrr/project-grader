@@ -34,6 +34,7 @@ import CardVisionPanel from "@/components/cert/CardVisionPanel";
 import CertHeaderActions, {
   CertIdPill,
 } from "@/components/cert/CertHeaderActions";
+import PricingSection from "@/components/cert/PricingSection";
 import { resolvePublicBaseUrl } from "@/lib/publicUrl";
 
 export const revalidate = 300;
@@ -122,6 +123,7 @@ export default async function CertPage({
             <NoGradeNotice />
           )}
           {cert.population && <PopulationPanel pop={cert.population} />}
+          {cert.pricing && <PricingSection pricing={cert.pricing} />}
         </div>
       </div>
 

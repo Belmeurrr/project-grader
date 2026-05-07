@@ -46,8 +46,10 @@ function NavLink({ route, pathname }: { route: Route; pathname: string }) {
     );
   }
 
+  // typedRoutes is enabled in next.config; cast to satisfy the
+  // statically-checked Link href type for our small static route list.
   return (
-    <Link href={route.href} className={className}>
+    <Link href={route.href as never} className={className}>
       {route.label}
     </Link>
   );

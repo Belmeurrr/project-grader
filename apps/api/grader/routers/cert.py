@@ -64,6 +64,7 @@ from grader.schemas.submissions import (
     _severity_from_score,
 )
 from grader.services import storage
+from grader.services.pricing import fetch_pricing
 from grader.services.rate_limit import limiter
 
 router = APIRouter(prefix="/cert", tags=["cert"])
@@ -139,16 +140,20 @@ async def get_certificate(
     population = await _build_population_stat(db, submission)
     images = _build_images_public(submission.id)
 
+    identified = _identified_card_or_none(submission)
+    pricing = await fetch_pricing(identified) if identified is not None else None
+
     response.headers["Cache-Control"] = _PUBLIC_CACHE_HEADER
     return CertificatePublic(
         cert_id=submission.id,
         completed_at=submission.completed_at,  # required when status=COMPLETED
-        identified_card=_identified_card_or_none(submission),
+        identified_card=identified,
         grades=grades,
         authenticity=auth,
         regions=regions,
         population=population,
         images=images,
+        pricing=pricing,
     )
 
 
