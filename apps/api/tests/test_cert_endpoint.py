@@ -464,3 +464,126 @@ async def test_cert_endpoint_returns_damage_heatmap_regions(
     assert surface["position"] == "whole_card"
     assert surface["score"] is None
     assert surface["severity"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_populates_region_reasons(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """DINGS-style itemized rationale: each region carries a `reasons`
+    list keyed off (kind, severity).
+
+    Build a Grade row that exercises every severity bucket simultaneously:
+      - centering=5.0 → 0.5 → "major" → ["Significant off-center crop"]
+      - edges=8.7    → 0.87 → "minor" → ["Minor edge wear"] (per side)
+      - corners=10.0 → 1.0  → "ok"    → [] (no defect to flag)
+      - surface=None        → "unknown" → ["Analysis pending"]
+        (surface trainer hasn't shipped, so unknown surfaces a placeholder
+        rationale instead of nothing)."""
+    user = User(
+        clerk_id=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@x",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    sub = Submission(
+        user_id=user.id,
+        status=SubmissionStatus.COMPLETED,
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(sub)
+    await db_session.flush()
+    grade = Grade(
+        submission_id=sub.id,
+        scheme=GradingScheme.PSA,
+        centering=5.0,    # → severity=major
+        edges=8.7,        # → severity=minor
+        corners=10.0,     # → severity=ok
+        surface=None,     # → severity=unknown
+        final=None,
+        confidence=0.5,
+    )
+    db_session.add(grade)
+    await db_session.flush()
+
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    regions = r.json()["regions"]
+
+    by_kind: dict[str, list[dict]] = {}
+    for reg in regions:
+        by_kind.setdefault(reg["kind"], []).append(reg)
+
+    # Every region MUST carry a `reasons` list (default []).
+    for reg in regions:
+        assert "reasons" in reg
+        assert isinstance(reg["reasons"], list)
+
+    # Centering: severity=major → at least one reason.
+    centering = by_kind["centering"][0]
+    assert centering["severity"] == "major"
+    assert len(centering["reasons"]) >= 1
+    assert "off-center" in centering["reasons"][0].lower()
+
+    # Edges: severity=minor → "Minor edge wear" on every side entry.
+    for edge in by_kind["edge"]:
+        assert edge["severity"] == "minor"
+        assert edge["reasons"] == ["Minor edge wear"]
+
+    # Corners: severity=ok → empty reasons (nothing to flag).
+    for corner in by_kind["corner"]:
+        assert corner["severity"] == "ok"
+        assert corner["reasons"] == []
+
+    # Surface: severity=unknown for a kind whose trainer hasn't shipped
+    # → "Analysis pending" placeholder.
+    surface = by_kind["surface"][0]
+    assert surface["severity"] == "unknown"
+    assert surface["reasons"] == ["Analysis pending"]
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_clean_grade_yields_empty_reasons(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """Sanity check: a clean card (every shipped grader at OK) yields
+    EMPTY reasons across centering + edges, with the unshipped corner +
+    surface kinds still showing the "Analysis pending" placeholder for
+    severity=unknown. The cert page renders this as the "No defects
+    flagged" empty state for the shipped kinds."""
+    user = User(
+        clerk_id=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@x",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    sub = Submission(
+        user_id=user.id,
+        status=SubmissionStatus.COMPLETED,
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(sub)
+    await db_session.flush()
+    grade = Grade(
+        submission_id=sub.id,
+        scheme=GradingScheme.PSA,
+        centering=10.0,
+        edges=10.0,
+        corners=None,
+        surface=None,
+        final=None,
+        confidence=0.9,
+    )
+    db_session.add(grade)
+    await db_session.flush()
+
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    regions = r.json()["regions"]
+    by_kind: dict[str, list[dict]] = {}
+    for reg in regions:
+        by_kind.setdefault(reg["kind"], []).append(reg)
+
+    assert by_kind["centering"][0]["reasons"] == []
+    for edge in by_kind["edge"]:
+        assert edge["reasons"] == []

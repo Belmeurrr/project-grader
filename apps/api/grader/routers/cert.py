@@ -49,7 +49,9 @@ from grader.schemas.submissions import (
     DetectorScorePublic,
     GradeOut,
     IdentifiedCard,
+    RegionKind,
     RegionScore,
+    RegionSeverity,
     _severity_from_score,
 )
 from grader.services.rate_limit import limiter
@@ -142,6 +144,60 @@ def _primary_grade(submission: Submission) -> Grade | None:
     return submission.grades[0]
 
 
+# --------------------------------------------------------------------------
+# DINGS-style itemized defect rationale.
+#
+# TAG Grading's perceived-transparency edge is the textual reason list
+# next to the heatmap ("Top-left corner: minor whitening", "Bottom edge:
+# notch at 3% from corner"). We don't have measured per-defect outputs
+# yet — the corners/surface trainers are skeletons, the edges grader
+# emits per-side measurements but nothing is persisted at the bb /
+# pixel-coordinate level. So the strings below are a HEURISTIC stand-in
+# keyed off (kind, severity): future trainer work will replace these by
+# populating ``RegionScore.reasons`` directly with measured rationale
+# (e.g. "notch at 3% from top-left corner, 1.2mm").
+#
+# Empty string lists are intentional for severity=ok ("nothing to flag")
+# so the cert page can show an honest "No defects flagged" empty state.
+# severity=unknown surfaces "Analysis pending" only for kinds whose
+# trainers haven't shipped (corners, surface today) — for centering /
+# edges, an unknown score means the row literally lacks the column,
+# which is an unusual partial-grade state already disclosed by the
+# preliminary-grade banner above.
+# --------------------------------------------------------------------------
+_REASON_TABLE: dict[tuple[RegionKind, RegionSeverity], list[str]] = {
+    ("centering", "minor"): ["Minor off-center"],
+    ("centering", "major"): ["Significant off-center crop"],
+    ("corner", "minor"): ["Minor whitening or wear"],
+    ("corner", "major"): ["Visible corner damage"],
+    ("edge", "minor"): ["Minor edge wear"],
+    ("edge", "major"): ["Edge chipping or notching"],
+    ("surface", "minor"): ["Light surface marks"],
+    ("surface", "major"): ["Significant surface damage"],
+}
+
+# Kinds whose trainers are still skeletons in Phase 1; surface "Analysis
+# pending" for unknown severity rather than nothing, so the user sees
+# why a defect callout might be absent. Centering + edges have shipped
+# scoring and shouldn't show a placeholder.
+_PENDING_KINDS: frozenset[RegionKind] = frozenset({"corner", "surface"})
+
+
+def _reasons_for(kind: RegionKind, severity: RegionSeverity) -> list[str]:
+    """Heuristic stand-in mapping (kind, severity) → rationale strings.
+
+    TODO: once the trainers ship richer per-defect outputs (measured
+    pixel locations, per-defect bounding boxes, textual classifications)
+    populate ``RegionScore.reasons`` from those outputs upstream and
+    drop this helper. The table is intentionally tiny and string-keyed
+    so that's a clean swap-in."""
+    if severity == "ok":
+        return []
+    if severity == "unknown":
+        return ["Analysis pending"] if kind in _PENDING_KINDS else []
+    return list(_REASON_TABLE.get((kind, severity), []))
+
+
 def _build_regions_for_grade(grade: Grade) -> list[RegionScore]:
     """Translate a Grade row into the public ``regions`` list.
 
@@ -165,17 +221,20 @@ def _build_regions_for_grade(grade: Grade) -> list[RegionScore]:
     regions: list[RegionScore] = []
 
     centering_norm = grade.centering / 10.0 if grade.centering is not None else None
+    centering_severity = _severity_from_score(centering_norm)
     regions.append(
         RegionScore(
             kind="centering",
             position="whole_card",
             score=centering_norm,
-            severity=_severity_from_score(centering_norm),
+            severity=centering_severity,
+            reasons=_reasons_for("centering", centering_severity),
         )
     )
 
     edges_norm = grade.edges / 10.0 if grade.edges is not None else None
     edges_severity = _severity_from_score(edges_norm)
+    edges_reasons = _reasons_for("edge", edges_severity)
     for edge_pos in ("top", "right", "bottom", "left"):
         regions.append(
             RegionScore(
@@ -183,11 +242,13 @@ def _build_regions_for_grade(grade: Grade) -> list[RegionScore]:
                 position=edge_pos,  # type: ignore[arg-type]
                 score=edges_norm,
                 severity=edges_severity,
+                reasons=list(edges_reasons),
             )
         )
 
     corners_norm = grade.corners / 10.0 if grade.corners is not None else None
     corners_severity = _severity_from_score(corners_norm)
+    corners_reasons = _reasons_for("corner", corners_severity)
     for corner_pos in ("top_left", "top_right", "bottom_left", "bottom_right"):
         regions.append(
             RegionScore(
@@ -195,16 +256,19 @@ def _build_regions_for_grade(grade: Grade) -> list[RegionScore]:
                 position=corner_pos,  # type: ignore[arg-type]
                 score=corners_norm,
                 severity=corners_severity,
+                reasons=list(corners_reasons),
             )
         )
 
     surface_norm = grade.surface / 10.0 if grade.surface is not None else None
+    surface_severity = _severity_from_score(surface_norm)
     regions.append(
         RegionScore(
             kind="surface",
             position="whole_card",
             score=surface_norm,
-            severity=_severity_from_score(surface_norm),
+            severity=surface_severity,
+            reasons=_reasons_for("surface", surface_severity),
         )
     )
 

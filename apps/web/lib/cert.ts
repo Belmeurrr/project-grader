@@ -90,6 +90,16 @@ export type Region = {
   position: RegionPosition;
   score: number | null;
   severity: RegionSeverity;
+  /**
+   * Itemized DINGS-style rationale strings — short defect descriptions
+   * surfaced under the heatmap as a bullet list (e.g. "Minor whitening
+   * or wear", "Edge chipping or notching"). Today these are derived
+   * heuristically from severity + kind on the API; future trainer
+   * outputs (measured pixel locations, per-defect bbs, textual
+   * classifications) will populate this field directly. Empty list for
+   * severity=ok regions.
+   */
+  reasons: string[];
 };
 
 export type Certificate = {

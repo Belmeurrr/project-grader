@@ -68,12 +68,24 @@ class RegionScore(BaseModel):
     (centering whole-card, an aggregate edges entry until the per-side
     breakdown gets persisted, corner placeholders, and a surface
     placeholder). The web overlay positions cells by ``position`` and
-    color-codes them by ``severity``."""
+    color-codes them by ``severity``.
+
+    ``reasons`` is a free-text list of itemized rationale strings —
+    "DINGS-style" defect descriptions surfaced under the heatmap on the
+    cert page (e.g. "Minor whitening or wear", "Edge chipping or
+    notching"). Today these are derived heuristically from severity +
+    kind in ``grader.routers.cert._build_regions_for_grade``; once the
+    trainers ship richer outputs (measured pixel locations, per-defect
+    bounding boxes, textual classifications) those should populate this
+    field directly so the cert page renders verbatim. Intentionally a
+    plain ``list[str]`` rather than a structured shape so future trainer
+    work can swap in without a schema bump."""
 
     kind: RegionKind
     position: RegionPosition
     score: float | None = None
     severity: RegionSeverity
+    reasons: list[str] = Field(default_factory=list)
 
 
 class SubmissionCreate(BaseModel):

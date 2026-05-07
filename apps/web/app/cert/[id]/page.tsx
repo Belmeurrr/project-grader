@@ -24,6 +24,7 @@ import {
 import CertShareCard, {
   ReviewRequestLink,
 } from "@/components/cert/CertShareCard";
+import DefectList from "@/components/cert/DefectList";
 import { resolvePublicBaseUrl } from "@/lib/publicUrl";
 
 // Force static generation w/ revalidation — Next.js ISR. The cert
@@ -181,6 +182,7 @@ function GradesSection({ cert }: { cert: Certificate }) {
         confidence={primary.confidence}
       />
       <DamageHeatmap regions={cert.regions} />
+      <DefectList regions={cert.regions} />
     </section>
   );
 }
