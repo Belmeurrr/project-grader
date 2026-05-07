@@ -88,25 +88,9 @@ Counterfeit ensemble is now **7/7 wired** end-to-end (FFT rosette + color profil
 
 After deep research on TAG Grading's DIG report (commit 6c4ecef shipped the share-infra layer — OG meta, QR, print, confidence band, review-request stub). These four are what's left from that backlog, ranked by the agent's recommended priority.
 
-- [ ] **DINGS-style itemized defect rationale** (M)
-  - TAG's "DINGS" are the textual reasons that drove the grade ("Top-left corner: minor whitening", "Bottom edge: notch at 3% from corner"). We have `RegionScore.severity` + `score` but no human-readable rationale.
-  - API: extend `RegionScore` (apps/api/grader/schemas/submissions.py) with `reasons: list[str]`. Build them in `_build_regions_for_grade` in routers/cert.py, derived from the existing scores (e.g. severity=major → "Major defect detected"; severity=minor → "Minor wear noted") with TODO comments for richer rationale once trainer outputs include per-defect descriptions.
-  - Web: mirror in apps/web/lib/cert.ts; add `<DefectList>` component beneath `<DamageHeatmap>` in apps/web/app/cert/[id]/page.tsx — bullet list of "Region: reason" strings, color-coded by severity. Empty list → "No defects flagged" subtle grey.
-  - Tests: extend test_cert_endpoint.py to assert reasons populate; web unit test that the component renders with empty + populated lists.
-  - Single biggest perceived-transparency win according to the research agent.
-
-- [ ] **Population "1 of N" counter** (M)
-  - "1 of 47 graded by Project Grader · #3 highest score" — psychologically powerful, cheap to compute, mirrors TAG's chronology counter.
-  - API: new endpoint `GET /cert/{id}/pop` (or fold into the existing cert payload). Aggregate query: count `Submission`s identified to the same `(manufacturer, variant_id)` with status=COMPLETED + their final grades; rank this submission's score within that distribution.
-  - Cache aggressively — the count only changes when new graded submissions land for the same variant. 5-min cache header is enough.
-  - Web: `<PopulationStat>` in `<Header>` of cert page. Three lines: total count, this card's rank, max grade for this variant.
-  - Edge case: when `identified_card is None` (identification failed), don't render the section.
-
-- [ ] **Card Vision opacity slider** (M, prerequisite: signed-URL flow for cert images)
-  - TAG's "Surface Defect Transparency Slider" — drag to fade between the normal scan and a defect-highlighted derivative. Headline copy-the-best-of-TAG visual feature.
-  - Prerequisite: cert payload currently exposes no S3 keys / image URLs (privacy posture from the audit). Add **presigned-GET URLs** (1-hour expiry, scoped to that cert ID) for the canonical front + flash images. New fields on CertificatePublic.
-  - Web: `<CardVisionSlider>` client component with a CSS opacity slider, crossfading between the two images. Replace the placeholder `bg-zinc-900/40` rectangle in `<DamageHeatmap>` with the layered card image.
-  - Defect-highlighted derivative: for now, just overlay the existing region badges on the image (which is what the heatmap already does — Card Vision is the layered-image upgrade). True per-pixel defect overlay waits on surface-trainer real outputs.
+- [x] **DINGS-style itemized defect rationale** — shipped 2026-05-06 (ea5206c). `<DefectList>` component beneath `<DamageHeatmap>` on the cert page; heuristic stand-in rationale strings keyed off (kind, severity), TODO points to richer per-defect outputs replacing them once trainer outputs ship. Tests: 13 API + 14 web pass.
+- [x] **Population "1 of N" counter** — shipped 2026-05-06 (de1799e). Folded into `CertificatePublic.population` (single fetch). Window-function SQL query computes total_graded, this_rank, max_grade, chronological_index in one pass over COMPLETED submissions for the same variant. Rendered as a 3-column `<dl>` in `<Header>` (stacks on mobile). Hides entirely when `identified_card is None` (no peer set → no "1 of 1" noise).
+- [x] **Card Vision opacity slider** — shipped 2026-05-06 (77e61b4). 1-hour presigned-GET URLs for canonical front + optional flash + tilt added to cert payload (cache header dropped to 40min max-age, no SWR, so CDN never serves a stale presign). `<CardVisionSlider>` client component crossfades between standard + flash with a range input + `aria-valuetext` for screen readers. Falls back to single-image render when only front exists, or to placeholder when no canonicals.
 
 - [ ] **eBay sold-listings comp widget on the cert** (L — defer to dedicated session)
   - TAG and PSA don't surface comp sales on the cert; would be a major differentiator.
