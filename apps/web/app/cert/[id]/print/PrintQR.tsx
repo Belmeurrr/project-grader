@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * QR for the print one-pager. Same QRCodeSVG used in <CertShareCard>,
- * but sized larger (160px) and rendered black-on-white for monochrome
- * printers. Wrapped in its own client component because the `qrcode.react`
- * library is client-only (uses canvas/svg APIs).
+ * QR for the print one-pager. Sized larger (160px) than the
+ * cert-page QR popover and rendered black-on-white for monochrome
+ * printers. Wrapped in its own client component because the
+ * `qrcode.react` library is client-only (uses canvas/svg APIs).
  */
 import { QRCodeSVG } from "qrcode.react";
 

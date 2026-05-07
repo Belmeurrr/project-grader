@@ -8,8 +8,8 @@
  *   - navigator.clipboard / navigator.share are runtime APIs
  *   - useState drives the copy-toast and QR popover
  *
- * Wraps the existing QRCodeSVG dependency that was already on the
- * frontend for CertShareCard (same package, same caveats).
+ * Uses qrcode.react for the QR popover (same library the print
+ * one-pager uses).
  */
 
 import { useState } from "react";

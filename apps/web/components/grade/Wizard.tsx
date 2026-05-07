@@ -8,6 +8,7 @@
  * also import it directly into the unit-test path.
  */
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -69,6 +70,10 @@ export function Body({
           borderRadius: 8,
           textAlign: "center",
           color: "var(--amber)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+          alignItems: "center",
         }}
       >
         <p
@@ -84,7 +89,7 @@ export function Body({
         <p
           className="mono"
           style={{
-            marginTop: 10,
+            margin: 0,
             fontSize: 11,
             color: "var(--ink-3)",
             letterSpacing: "0.04em",
@@ -92,6 +97,13 @@ export function Body({
         >
           this page polls automatically · typical run completes within ~20s
         </p>
+        <Link
+          href={`/pipeline/${submission.id}`}
+          className="pg-btn pg-btn-ghost"
+          style={{ padding: "8px 14px", fontSize: 12 }}
+        >
+          View pipeline trace →
+        </Link>
       </section>
     );
   }
