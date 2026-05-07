@@ -126,7 +126,7 @@ Per-step rc surfaced in `~/psa_data/launchd.stdout.log`. Plist hands off to `dai
 | Identification trainer | ⚠️ Skeleton; supervised metric learning unblocked, awaits real run |
 | Detection trainer | ⚠️ Skeleton; manifest regen + GPU run pending |
 | Counterfeit threshold recalibration | ⚠️ Tool ready; needs ~300 labeled cards |
-| Alembic migration (fresh-DB) | ❌ Broken: enum double-creation in `0001_initial_schema.py`; bypass via `Base.metadata.create_all` |
+| Alembic migration (fresh-DB) | ✅ Fixed (2026-05-07): `create_type=False` on enum constructors so the explicit `enum.create(bind, checkfirst=True)` loop is the only creation site |
 | Clerk dev-mode fallback (web) | ✅ Now genuinely no-ops when key unset (was broken in v5+; fixed 2026-05-07) |
 
 ---

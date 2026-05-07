@@ -68,12 +68,11 @@ Counterfeit ensemble is now **7/7 wired** end-to-end (FFT rosette + color profil
 
 ## Now — code-tractable, high personal utility
 
-- [ ] **Fix alembic migration — enum double-creation on fresh DB** (XS)
-  - `alembic upgrade head` fails on a fresh DB with `type "game" already exists`. Cause: enums in `apps/api/alembic/versions/20260428_0001_initial_schema.py` are constructed with `create_type=True` *and* explicitly created via `enum.create(bind, checkfirst=True)`. When the same `postgresql.ENUM(...)` instance is later referenced inside `op.create_table(sa.Column(..., game_enum, ...))`, SQLAlchemy emits a second `CREATE TYPE` without `IF NOT EXISTS`. Tests bypass alembic via `Base.metadata.create_all` (see `apps/api/tests/conftest.py`), so this has been latent since the migration landed.
-  - Fix: pass `create_type=False` to all five `postgresql.ENUM(...)` constructors at lines 65–75; the explicit `enum.create(bind, checkfirst=True)` loop at 77–84 is the only intended creation site. Smoke: drop `grader` DB, `alembic upgrade head`, confirm clean upgrade.
-  - Personal-use rationale: low (one-time bootstrap), but the workaround (`Base.metadata.create_all`) skips the alembic version table, so any subsequent migration that ships will need a manual `alembic stamp head` first. Worth fixing once, while the bug is fresh.
+- [x] **Fix alembic migration — enum double-creation on fresh DB** ✅ Shipped 2026-05-07. `create_type=False` on the five `postgresql.ENUM(...)` constructors in `apps/api/alembic/versions/20260428_0001_initial_schema.py` so the explicit `enum.create(bind, checkfirst=True)` loop is the only creation site. Verified end-to-end against a fresh `grader_alembic_test` DB (alembic upgrade head → 0002, 8 tables created clean). The previous workaround (`Base.metadata.create_all`) is no longer needed; the README quick-start now just runs `alembic upgrade head`.
 
-- [ ] **Home-page CTA → /grade** (XS)
+- [x] **Home-page CTA → /grade** ✅ Shipped via the Workbench port (commit f70731e). The new `/` is the Workbench dashboard; the empty-state and hero both link to `/grade`.
+
+- [ ] **Home-page CTA → /grade** (XS) — superseded
   - `apps/web/app/page.tsx` is pure marketing — no nav links anywhere. The only entry point to the wizard is typing `/grade` in the URL. Add a "Start grading" button below the headline that links to `/grade`. Five-minute fix; meaningful friction reduction every time you grade a card.
 
 - [ ] **TCGplayer pricing comps on the cert** (M)

@@ -62,16 +62,25 @@ def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
 
-    game_enum = postgresql.ENUM(*GAME_VALUES, name="game", create_type=True)
+    # `create_type=False` is critical: when an ENUM instance is referenced
+    # later inside `op.create_table(sa.Column("game", game_enum, ...))`,
+    # SQLAlchemy emits a CREATE TYPE for it at column-creation time UNLESS
+    # `create_type=False` is set on the constructor. Combined with the
+    # explicit `enum.create(bind, checkfirst=True)` loop below — which is
+    # the only intended creation site — this avoids the duplicate
+    # `type "game" already exists` error on a fresh DB. The bug was
+    # latent because the test suite bypasses alembic via
+    # `Base.metadata.create_all` (see `apps/api/tests/conftest.py`).
+    game_enum = postgresql.ENUM(*GAME_VALUES, name="game", create_type=False)
     submission_status_enum = postgresql.ENUM(
-        *SUBMISSION_STATUS_VALUES, name="submissionstatus", create_type=True
+        *SUBMISSION_STATUS_VALUES, name="submissionstatus", create_type=False
     )
-    shot_kind_enum = postgresql.ENUM(*SHOT_KIND_VALUES, name="shotkind", create_type=True)
+    shot_kind_enum = postgresql.ENUM(*SHOT_KIND_VALUES, name="shotkind", create_type=False)
     grading_scheme_enum = postgresql.ENUM(
-        *GRADING_SCHEME_VALUES, name="gradingscheme", create_type=True
+        *GRADING_SCHEME_VALUES, name="gradingscheme", create_type=False
     )
     authenticity_verdict_enum = postgresql.ENUM(
-        *AUTHENTICITY_VERDICT_VALUES, name="authenticityverdict", create_type=True
+        *AUTHENTICITY_VERDICT_VALUES, name="authenticityverdict", create_type=False
     )
     bind = op.get_bind()
     for enum in (

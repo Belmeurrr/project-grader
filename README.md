@@ -77,26 +77,10 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_DEV_CLERK_ID=dev-user
 ```
 
-### 3. Bootstrap the schema
-
-> ⚠️ `alembic upgrade head` currently fails on a fresh DB with `type "game" already exists` (enum double-creation in the initial migration; tests bypass alembic via `Base.metadata.create_all` so this has been latent). Until the migration is fixed, bootstrap directly via SQLAlchemy models:
+### 3. Apply migrations
 
 ```bash
-python -m uv run --project apps/api --directory apps/api python -c "
-import asyncio
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
-from grader.db.models import Base
-
-async def main():
-    engine = create_async_engine('postgresql+asyncpg://grader:grader@localhost:5432/grader')
-    async with engine.begin() as conn:
-        await conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
-        await conn.execute(text('CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"'))
-        await conn.run_sync(Base.metadata.create_all)
-    await engine.dispose()
-asyncio.run(main())
-"
+python -m uv run --project apps/api --directory apps/api alembic upgrade head
 ```
 
 ### 4. Create the MinIO bucket
@@ -136,8 +120,7 @@ Go directly to **http://localhost:3000/grade** — the home page (`/`) is a mark
 
 ## Known dev-setup gotchas
 
-- **Alembic migration is broken on fresh DBs** (see § 3 above). Tests bypass it via `Base.metadata.create_all`, so it's been undetected. Real fix: `create_type=False` on the enum constructors in `apps/api/alembic/versions/20260428_0001_initial_schema.py`. Tracked in [TODO.md](TODO.md).
-- **Clerk dev fallback** in `apps/web/middleware.ts` and `apps/web/app/layout.tsx` was previously broken under `@clerk/nextjs` v5+ — comments claimed "no-op when key missing" but Clerk threw / showed a keyless overlay. Both files now genuinely short-circuit when `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is unset, preserving the documented fallback. Production behavior unchanged.
+- **Clerk dev fallback** in `apps/web/middleware.ts`, `apps/web/app/layout.tsx`, and `apps/web/lib/submission.ts` short-circuits when `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is unset. `useAuthedFetch` picks one of two implementations at module load (Clerk vs dev-token) so rules-of-hooks stays satisfied. Production behavior unchanged when keys are present.
 - **Identification returns `None` without a reference catalog.** The dev box needs `~/manufacturer_refs/reference_embeddings.npz` (produced by the daily flywheel on the Mac). Without it, the cert renders an amber "preliminary" banner with no card name; centering / edges / detectors that don't depend on a catalog still run.
 - **Windows + Celery**: use `--pool=solo`. The default `prefork` pool doesn't fork on Windows.
 
