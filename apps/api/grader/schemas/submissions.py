@@ -254,6 +254,26 @@ class PopulationStat(BaseModel):
     chronological_index: int
 
 
+class CertImagePublic(BaseModel):
+    """Time-limited presigned-GET URLs for the canonical card images.
+
+    Expire 1 hour after the cert payload is generated. Suitable for
+    direct rendering in the public cert page — the URLs are bounded
+    blast-radius (single S3 object, single cert id, narrow TTL) so the
+    privacy posture stays the same as the rest of the public cert
+    payload: no raw S3 keys leaked, no ambient bucket access.
+
+    Any of the URL fields may be None: ``front_canonical_url`` is the
+    only one guaranteed when canonicals exist (it's the always-required
+    front_full shot), while ``front_flash_url`` and ``tilt_url`` depend
+    on the user having captured those optional shots."""
+
+    front_canonical_url: str | None = None
+    front_flash_url: str | None = None
+    tilt_url: str | None = None
+    expires_at: datetime
+
+
 class CertificatePublic(BaseModel):
     """Public-cert view of a COMPLETED submission.
 
@@ -279,3 +299,8 @@ class CertificatePublic(BaseModel):
     # identified variant (no peer set to compute against). See
     # `PopulationStat` and `_build_population_stat` in `grader.routers.cert`.
     population: PopulationStat | None = None
+    # Presigned-GET URLs for the canonical card images. None when no
+    # canonicals exist (e.g. detection soft-failed) or when presigning
+    # itself failed (S3 unhealthy, bad creds — best-effort degrade so
+    # the cert page still renders the rest of the payload).
+    images: CertImagePublic | None = None

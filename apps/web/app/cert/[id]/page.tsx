@@ -16,6 +16,7 @@ import { notFound } from "next/navigation";
 
 import {
   type AuthenticityVerdict,
+  type CertImage,
   type Certificate,
   type DetectorScore,
   type Grade,
@@ -24,6 +25,7 @@ import {
   type RegionSeverity,
   fetchCertificate,
 } from "@/lib/cert";
+import CardVisionSlider from "@/components/cert/CardVisionSlider";
 import CertShareCard, {
   ReviewRequestLink,
 } from "@/components/cert/CertShareCard";
@@ -250,7 +252,11 @@ function GradesSection({ cert }: { cert: Certificate }) {
         finalGrade={primary.final}
         confidence={primary.confidence}
       />
-      <DamageHeatmap regions={cert.regions} />
+      <DamageHeatmap
+        regions={cert.regions}
+        images={cert.images}
+        cardName={cert.identified_card?.name ?? "Card"}
+      />
       <DefectList regions={cert.regions} />
     </section>
   );
@@ -278,12 +284,22 @@ const SEVERITY_RING_CLASSES: Record<RegionSeverity, string> = {
   unknown: "border-zinc-700 bg-zinc-800/40",
 };
 
-function DamageHeatmap({ regions }: { regions: Region[] }) {
+function DamageHeatmap({
+  regions,
+  images,
+  cardName,
+}: {
+  regions: Region[];
+  images: CertImage | null;
+  cardName: string;
+}) {
   if (regions.length === 0) return null;
   const corners = regions.filter((r) => r.kind === "corner");
   const edges = regions.filter((r) => r.kind === "edge");
   const centering = regions.find((r) => r.kind === "centering");
   const surface = regions.find((r) => r.kind === "surface");
+  const frontUrl = images?.front_canonical_url ?? null;
+  const flashUrl = images?.front_flash_url ?? null;
 
   return (
     <div className="mt-6">
@@ -291,37 +307,125 @@ function DamageHeatmap({ regions }: { regions: Region[] }) {
         Defect map
       </h3>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-6">
-        <div className="relative mx-auto aspect-[5/7] w-48 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40 sm:mx-0">
-          {centering && (
-            <div
-              className={`pointer-events-none absolute rounded-md border-2 ${SEVERITY_RING_CLASSES[centering.severity]}`}
-              style={{ top: "18%", bottom: "18%", left: "12%", right: "12%" }}
-              aria-label={`Centering: ${centering.severity}`}
-            />
-          )}
-          {edges.map((e) => (
-            <EdgeCell key={`edge-${e.position}`} region={e} />
-          ))}
-          {corners.map((c) => (
-            <CornerCell key={`corner-${c.position}`} region={c} />
-          ))}
-          {surface && (
-            <div
-              className={`pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border px-2 py-1 text-[10px] font-medium ${SEVERITY_RING_CLASSES[surface.severity]} text-zinc-200`}
-              aria-label={`Surface: ${surface.severity}`}
-            >
-              {surface.severity === "unknown"
-                ? "surface analysis pending"
-                : "surface"}
-            </div>
-          )}
-        </div>
+        {/* Card-shaped frame: when canonicals are present the actual
+            scan renders behind the region badges via Card Vision; the
+            slider control itself sits beneath the frame so the badges
+            stay scoped to the card geometry. When no canonicals, we
+            keep the existing placeholder rectangle and badges. */}
+        <CardWithRegionsAndSlider
+          frontUrl={frontUrl}
+          flashUrl={flashUrl}
+          cardName={cardName}
+          centering={centering}
+          edges={edges}
+          corners={corners}
+          surface={surface}
+        />
         <DamageHeatmapLegend />
       </div>
       <p className="mt-2 text-xs text-zinc-500">
         Visualization only. Numeric subgrades above are the canonical scores.
       </p>
     </div>
+  );
+}
+
+function CardWithRegionsAndSlider({
+  frontUrl,
+  flashUrl,
+  cardName,
+  centering,
+  edges,
+  corners,
+  surface,
+}: {
+  frontUrl: string | null;
+  flashUrl: string | null;
+  cardName: string;
+  centering: Region | undefined;
+  edges: Region[];
+  corners: Region[];
+  surface: Region | undefined;
+}) {
+  const hasImages = Boolean(frontUrl || flashUrl);
+  return (
+    <div className="mx-auto w-72 sm:mx-0">
+      {hasImages ? (
+        // Card Vision slider renders its own card-shaped frame + control
+        // strip. Wrap it in a position-relative shim so the region badges
+        // can absolutely position against the same 5/7 aspect frame the
+        // image stack uses (the slider's first child is that frame).
+        <div className="relative">
+          <CardVisionSlider
+            frontUrl={frontUrl}
+            flashUrl={flashUrl}
+            altPrefix={cardName}
+          />
+          <div className="pointer-events-none absolute inset-0">
+            <div className="relative aspect-[5/7] w-full">
+              <RegionBadges
+                centering={centering}
+                edges={edges}
+                corners={corners}
+                surface={surface}
+              />
+            </div>
+          </div>
+        </div>
+      ) : (
+        // No canonicals → existing placeholder + badges layout, byte-
+        // for-byte equivalent to the pre-Card-Vision shape so anyone
+        // viewing a soft-fail-detection submission sees the same UI.
+        <div className="relative aspect-[5/7] w-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40">
+          <RegionBadges
+            centering={centering}
+            edges={edges}
+            corners={corners}
+            surface={surface}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RegionBadges({
+  centering,
+  edges,
+  corners,
+  surface,
+}: {
+  centering: Region | undefined;
+  edges: Region[];
+  corners: Region[];
+  surface: Region | undefined;
+}) {
+  return (
+    <>
+      {centering && (
+        <div
+          className={`pointer-events-none absolute rounded-md border-2 ${SEVERITY_RING_CLASSES[centering.severity]}`}
+          style={{ top: "18%", bottom: "18%", left: "12%", right: "12%" }}
+          aria-label={`Centering: ${centering.severity}`}
+        />
+      )}
+      {edges.map((e) => (
+        <EdgeCell key={`edge-${e.position}`} region={e} />
+      ))}
+      {corners.map((c) => (
+        <CornerCell key={`corner-${c.position}`} region={c} />
+      ))}
+      {surface && (
+        <div
+          className={`pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border px-2 py-1 text-[10px] font-medium ${SEVERITY_RING_CLASSES[surface.severity]} text-zinc-200`}
+          aria-label={`Surface: ${surface.severity}`}
+        >
+          {surface.severity === "unknown"
+            ? "surface analysis pending"
+            : "surface"}
+        </div>
+      )}
+    </>
   );
 }
 

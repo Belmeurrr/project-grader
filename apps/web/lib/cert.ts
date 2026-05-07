@@ -115,6 +115,23 @@ export type PopulationStat = {
   chronological_index: number;
 };
 
+/**
+ * Time-limited presigned-GET URLs for the canonical card images.
+ * Mirrors `CertImagePublic` in the API schema.
+ *
+ * URLs are scoped to a single S3 object, expire 1 hour after the cert
+ * payload is generated, and are intended for direct rendering (Card
+ * Vision opacity slider). Any individual URL can be null — front_full
+ * is the only canonical guaranteed when canonicals exist; flash and
+ * tilt depend on whether the user captured those optional shots.
+ */
+export type CertImage = {
+  front_canonical_url: string | null;
+  front_flash_url: string | null;
+  tilt_url: string | null;
+  expires_at: string; // ISO8601
+};
+
 export type Certificate = {
   cert_id: string;
   completed_at: string; // ISO8601
@@ -125,6 +142,8 @@ export type Certificate = {
   regions: Region[];
   /** Pop counter — null when no identified variant. */
   population: PopulationStat | null;
+  /** Presigned-GET URLs for the canonical images, or null when none exist. */
+  images: CertImage | null;
 };
 
 const apiBaseUrl = (): string => {

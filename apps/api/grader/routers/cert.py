@@ -16,25 +16,32 @@ What's exposed:
 
 What's NOT exposed:
   - user_id (privacy)
-  - S3 keys / image URLs (would require signed-URL flow we don't
-    have for public consumers; v2 swap-in)
+  - raw S3 keys (the `images` block exposes only time-limited
+    presigned-GET URLs scoped to a single object, never the bucket
+    path)
   - audit log entries (internal pipeline detail)
   - shot-level metadata (blur scores, perspective angles)
   - in-progress / failed submissions (404 unless status==COMPLETED;
     don't surface partial results that may still change)
 
+What IS exposed (image-side):
+  - 1-hour presigned-GET URLs for the canonical front, optional
+    flash, and optional tilt. These power the Card Vision opacity
+    slider on the cert page (regular front <-> flash crossfade).
+
 Caching:
-  Sets `Cache-Control: public, max-age=300, stale-while-revalidate=3600`
-  on successful responses. Next.js ISR uses the same window. Once a
-  submission completes, its cert payload is immutable in practice
-  (the unique-on-submission_id row gets re-upserted only if the
-  pipeline re-runs, which is rare); 5-minute freshness with 1-hour
-  SWR is a generous fit.
+  Sets `Cache-Control: public, max-age=2400` (40 min, no SWR) on
+  successful responses. The original 5-min max-age + 1-hour SWR is
+  shortened here because the response body now embeds presigned URLs
+  with a 1-hour TTL — SWR would happily serve a stale URL after
+  expiry. 40 min keeps a 20-min margin of presign validity at the
+  edge of the cache window without sacrificing too much hit rate.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, text
@@ -42,9 +49,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from grader.db import get_db
-from grader.db.models import CardVariant, Grade, Submission, SubmissionStatus
+from grader.db.models import CardVariant, Grade, ShotKind, Submission, SubmissionStatus
 from grader.schemas.submissions import (
     CertAuthenticityPublic,
+    CertImagePublic,
     CertificatePublic,
     DetectorScorePublic,
     GradeOut,
@@ -55,12 +63,20 @@ from grader.schemas.submissions import (
     RegionSeverity,
     _severity_from_score,
 )
+from grader.services import storage
 from grader.services.rate_limit import limiter
 
 router = APIRouter(prefix="/cert", tags=["cert"])
 
 
-_PUBLIC_CACHE_HEADER = "public, max-age=300, stale-while-revalidate=3600"
+# Presigned-GET URLs we hand out for the canonical card images expire
+# after _IMAGE_PRESIGN_TTL_SECONDS. The cache header below is shortened
+# (vs. the original 5-min max-age + 1-hour SWR) so that a CDN-cached
+# cert payload always has at least 20 minutes of presign validity left
+# when served. Trade-off: we lose some hit rate at the CDN, but the
+# alternative is serving a stale URL that 403s in the user's browser.
+_IMAGE_PRESIGN_TTL_SECONDS = 3600  # 1 hour
+_PUBLIC_CACHE_HEADER = "public, max-age=2400"  # 40 min, no SWR
 
 
 @router.get("/{submission_id}", response_model=CertificatePublic)
@@ -121,6 +137,7 @@ async def get_certificate(
     regions = _build_regions_for_grade(primary_grade) if primary_grade else []
 
     population = await _build_population_stat(db, submission)
+    images = _build_images_public(submission.id)
 
     response.headers["Cache-Control"] = _PUBLIC_CACHE_HEADER
     return CertificatePublic(
@@ -131,6 +148,7 @@ async def get_certificate(
         authenticity=auth,
         regions=regions,
         population=population,
+        images=images,
     )
 
 
@@ -222,6 +240,74 @@ def _primary_grade(submission: Submission) -> Grade | None:
         if g.scheme.value == "psa":
             return g
     return submission.grades[0]
+
+
+# Canonical-image S3 keys are derived deterministically from the
+# submission id and shot kind by ``detection._canonical_s3_key`` —
+# layout: ``submissions/<id>/canonical/<kind>.png``. We don't persist
+# the keys on the Submission row; instead the cert endpoint HEADs each
+# of the three public-facing kinds and presigns the ones that exist.
+# Front_full is always present for COMPLETED submissions; flash + tilt
+# are optional captures that may legitimately be missing.
+_PUBLIC_CANONICAL_KINDS: tuple[ShotKind, ...] = (
+    ShotKind.FRONT_FULL,
+    ShotKind.FRONT_FULL_FLASH,
+    ShotKind.TILT_30,
+)
+
+
+def _canonical_key_for(submission_id: uuid.UUID, kind: ShotKind) -> str:
+    """Mirror of ``detection._canonical_s3_key`` — kept inline here to
+    avoid a router → services/detection import cycle and because the
+    layout is part of the public API contract (the cert page renders
+    these keys via presigned URLs)."""
+    return f"submissions/{submission_id}/canonical/{kind.value}.png"
+
+
+def _build_images_public(submission_id: uuid.UUID) -> CertImagePublic | None:
+    """Build the public images block by HEADing each canonical kind and
+    presigning the ones that exist.
+
+    Returns None when none of the canonical kinds resolve — keeps the
+    cert payload honest for submissions whose detection stage soft-
+    failed (no canonicals produced) and for any future submissions
+    where S3 itself is unhealthy."""
+    urls: dict[str, str | None] = {
+        "front_canonical_url": None,
+        "front_flash_url": None,
+        "tilt_url": None,
+    }
+    field_for_kind = {
+        ShotKind.FRONT_FULL: "front_canonical_url",
+        ShotKind.FRONT_FULL_FLASH: "front_flash_url",
+        ShotKind.TILT_30: "tilt_url",
+    }
+    found_any = False
+    for kind in _PUBLIC_CANONICAL_KINDS:
+        key = _canonical_key_for(submission_id, kind)
+        try:
+            head = storage.head_shot(key)
+        except Exception:
+            head = None
+        if head is None:
+            continue
+        url = storage.presigned_get_for_canonical(
+            key, expires_in_seconds=_IMAGE_PRESIGN_TTL_SECONDS
+        )
+        if url is None:
+            continue
+        urls[field_for_kind[kind]] = url
+        found_any = True
+
+    if not found_any:
+        return None
+    return CertImagePublic(
+        front_canonical_url=urls["front_canonical_url"],
+        front_flash_url=urls["front_flash_url"],
+        tilt_url=urls["tilt_url"],
+        expires_at=datetime.now(timezone.utc)
+        + timedelta(seconds=_IMAGE_PRESIGN_TTL_SECONDS),
+    )
 
 
 # --------------------------------------------------------------------------

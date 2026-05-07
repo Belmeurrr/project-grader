@@ -12,12 +12,19 @@ endpoint MUST:
 
 from __future__ import annotations
 
+import os
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
+import boto3
 import httpx
 import pytest
+from moto import mock_aws
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from grader.services import storage
+from grader.settings import get_settings
 
 from grader.db.models import (
     AuthenticityResult,
@@ -35,6 +42,47 @@ from grader.db.models import (
 # Every test in this module exercises the FastAPI client against a real
 # Postgres test DB via the `client`/`db_session` fixtures.
 pytestmark = pytest.mark.requires_postgres
+
+
+@pytest.fixture
+def s3_with_canonicals() -> Iterator[str]:
+    """Spin up moto S3 with the configured bucket created.
+
+    Tests that exercise the cert endpoint's `images` block use this to
+    seed canonical PNGs at the deterministic key paths the endpoint
+    expects (``submissions/<id>/canonical/<kind>.png``)."""
+    prior = {
+        k: os.environ.get(k)
+        for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    }
+    os.environ["AWS_ACCESS_KEY_ID"] = "test"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "test"
+    storage.reset_s3_client_cache()
+    with mock_aws():
+        bucket = get_settings().s3_bucket
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket=bucket)
+        storage.reset_s3_client_cache()
+        yield bucket
+    for k, v in prior.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    storage.reset_s3_client_cache()
+
+
+def _seed_canonical(submission_id: uuid.UUID, kind: str) -> str:
+    """Write a tiny PNG payload at ``submissions/<id>/canonical/<kind>.png``
+    and return the key. The cert endpoint HEADs these keys to decide
+    whether to surface a presigned URL."""
+    key = f"submissions/{submission_id}/canonical/{kind}.png"
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=get_settings().s3_bucket,
+        Key=key,
+        Body=b"\x89PNG\r\n\x1a\nfake-canonical",
+        ContentType="image/png",
+    )
+    return key
 
 
 async def _make_completed_submission(
@@ -669,3 +717,83 @@ async def test_cert_endpoint_clean_grade_yields_empty_reasons(
     assert by_kind["centering"][0]["reasons"] == []
     for edge in by_kind["edge"]:
         assert edge["reasons"] == []
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_images_null_when_no_canonicals(
+    client: httpx.AsyncClient, db_session: AsyncSession, s3_with_canonicals: str
+) -> None:
+    """A COMPLETED submission whose detection stage produced no
+    canonical images (or whose canonicals were never written) must
+    return ``images: null`` rather than an object full of nulls or a
+    stale URL."""
+    sub = await _make_completed_submission(db_session)
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["images"] is None
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_images_presigns_existing_canonicals(
+    client: httpx.AsyncClient, db_session: AsyncSession, s3_with_canonicals: str
+) -> None:
+    """When the front canonical exists in S3 at the deterministic key
+    path, the cert payload surfaces a presigned-GET URL for it. The
+    URL must be a string starting with http(s) and reference the s3
+    object path so it can be served directly to the public cert page."""
+    sub = await _make_completed_submission(db_session)
+    front_key = _seed_canonical(sub.id, "front_full")
+
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    images = body["images"]
+    assert images is not None
+    assert isinstance(images["front_canonical_url"], str)
+    assert images["front_canonical_url"].startswith("http")
+    # The presigned URL embeds the object path verbatim — the test asserts
+    # the s3 key appears somewhere in the URL so we know it's bound to
+    # the right object (not just any presigned URL).
+    assert front_key in images["front_canonical_url"]
+    # Optional shots not seeded → still null.
+    assert images["front_flash_url"] is None
+    assert images["tilt_url"] is None
+    assert "expires_at" in images
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_images_includes_flash_when_present(
+    client: httpx.AsyncClient, db_session: AsyncSession, s3_with_canonicals: str
+) -> None:
+    """Both front + flash seeded → both URLs surface. This is the pair
+    the Card Vision opacity slider crossfades between."""
+    sub = await _make_completed_submission(db_session)
+    _seed_canonical(sub.id, "front_full")
+    _seed_canonical(sub.id, "front_full_flash")
+
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200, r.text
+    images = r.json()["images"]
+    assert isinstance(images["front_canonical_url"], str)
+    assert isinstance(images["front_flash_url"], str)
+    assert images["front_flash_url"].startswith("http")
+
+
+@pytest.mark.asyncio
+async def test_cert_endpoint_cache_header_pairs_with_presign_ttl(
+    client: httpx.AsyncClient, db_session: AsyncSession, s3_with_canonicals: str
+) -> None:
+    """The ``max-age`` on the cert response must leave headroom against
+    the 1-hour presign TTL so a CDN-cached payload doesn't outlive its
+    embedded URLs. Pinning the exact value here so future tweaks are
+    deliberate, not accidental."""
+    sub = await _make_completed_submission(db_session)
+    r = await client.get(f"/cert/{sub.id}")
+    assert r.status_code == 200
+    cc = r.headers["Cache-Control"]
+    assert "max-age=2400" in cc
+    # SWR was dropped specifically because it would happily serve a
+    # stale cert payload (with a stale presigned URL) past max-age.
+    assert "stale-while-revalidate" not in cc

@@ -163,6 +163,50 @@ def presigned_post_for_shot(
     )
 
 
+def presigned_get_for_canonical(
+    s3_key: str,
+    *,
+    expires_in_seconds: int = 3600,  # 1 hour
+) -> str | None:
+    """Return a presigned GET URL for a canonical image, or None if
+    generation fails.
+
+    Public-facing — used by the cert page to render the actual card scan
+    with bounded blast radius. Unlike ``presigned_post_for_shot`` (which
+    raises a typed error for the route handler to map to 503), this
+    helper is best-effort: a missing S3 client / bad creds should NOT
+    503 the public cert page just because we can't display the image.
+    The cert page degrades gracefully to a placeholder when the URL is
+    None.
+
+    Expiry defaults to 1 hour; the cert endpoint pairs this with a
+    ``max-age`` short enough to leave a comfortable margin before the
+    URL would become stale (see ``_PUBLIC_CACHE_HEADER`` in the cert
+    router for the trade-off)."""
+    settings = get_settings()
+    try:
+        url = _s3_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.s3_bucket, "Key": s3_key},
+            ExpiresIn=expires_in_seconds,
+        )
+    except (ClientError, BotoCoreError) as e:
+        error_code = (
+            e.response.get("Error", {}).get("Code") if isinstance(e, ClientError) else None
+        )
+        logger.warning(
+            "presigned_get_for_canonical failed",
+            extra={
+                "operation": "generate_presigned_url",
+                "bucket": settings.s3_bucket,
+                "s3_key": s3_key,
+                "error_code": error_code,
+            },
+        )
+        return None
+    return url
+
+
 def head_shot(s3_key: str) -> dict[str, str | int] | None:
     """Confirm an object exists at the given key. Returns metadata or None."""
     settings = get_settings()
