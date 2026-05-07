@@ -21,6 +21,10 @@ import {
   type RegionSeverity,
   fetchCertificate,
 } from "@/lib/cert";
+import CertShareCard, {
+  ReviewRequestLink,
+} from "@/components/cert/CertShareCard";
+import { resolvePublicBaseUrl } from "@/lib/publicUrl";
 
 // Force static generation w/ revalidation — Next.js ISR. The cert
 // payload is immutable in practice once a submission completes, so
@@ -38,11 +42,26 @@ export default async function CertPage({
   const cert = await fetchCertificate(id);
   if (!cert) notFound();
 
+  const baseUrl = resolvePublicBaseUrl();
+  const certUrl = `${baseUrl}/cert/${id}`;
+  const primary: Grade | undefined =
+    cert.grades.find((g) => g.scheme === "psa") ?? cert.grades[0];
+  const finalGradeLabel =
+    primary && primary.final !== null ? primary.final.toFixed(1) : "—";
+  const cardName = cert.identified_card?.name ?? "Unidentified card";
+
   return (
     <main className="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-12">
+      <CertShareCard
+        certId={cert.cert_id}
+        certUrl={certUrl}
+        cardName={cardName}
+        finalGradeLabel={finalGradeLabel}
+      />
       <Header cert={cert} />
       <GradesSection cert={cert} />
       <AuthenticitySection cert={cert} />
+      <ReviewRequestLink certId={cert.cert_id} />
       <Footer cert={cert} />
     </main>
   );
@@ -53,10 +72,57 @@ export async function generateMetadata({
 }: {
   params: Promise<Params>;
 }) {
+  // Pull the same cert payload the page renders so the unfurl shows
+  // the actual grade + card name. Next.js's request memoization
+  // de-dupes the second `fetch` call against the page's, so this
+  // doesn't double-hit the API.
   const { id } = await params;
+  const cert = await fetchCertificate(id).catch(() => null);
+  const baseUrl = resolvePublicBaseUrl();
+  const url = `${baseUrl}/cert/${id}`;
+
+  const cardName = cert?.identified_card?.name ?? "Card certificate";
+  const primary =
+    cert?.grades.find((g) => g.scheme === "psa") ?? cert?.grades[0];
+  const finalLabel =
+    primary && primary.final !== null ? primary.final.toFixed(1) : null;
+  const verdict = cert?.authenticity?.verdict ?? null;
+
+  const titleSuffix = finalLabel ? ` — Graded ${finalLabel}` : "";
+  const title = `${cardName}${titleSuffix} • Project Grader`;
+  const description = finalLabel
+    ? `${cardName} graded ${finalLabel}${
+        verdict ? ` (${verdict.replace(/_/g, " ")})` : ""
+      }. View the full evidence trail and authenticity report.`
+    : `${cardName} — AI-graded card with full evidence trail.`;
+
   return {
-    title: `Cert ${id.slice(0, 8)}… — Project Grader`,
-    description: "AI-graded card with full evidence trail.",
+    title,
+    description,
+    metadataBase: new URL(baseUrl),
+    openGraph: {
+      type: "website" as const,
+      url,
+      title,
+      description,
+      siteName: "Project Grader",
+      images: [
+        {
+          // The Next.js file-based metadata image route. Resolved
+          // relative to `metadataBase` above.
+          url: `/cert/${id}/opengraph-image`,
+          width: 1200,
+          height: 630,
+          alt: `Cert ${id.slice(0, 8)} — ${cardName}`,
+        },
+      ],
+    },
+    twitter: {
+      card: "summary_large_image" as const,
+      title,
+      description,
+      images: [`/cert/${id}/opengraph-image`],
+    },
   };
 }
 
@@ -110,9 +176,10 @@ function GradesSection({ cert }: { cert: Certificate }) {
         <GradeStat label="Surface" value={primary.surface} />
         <GradeStat label="Final" value={primary.final} highlight />
       </div>
-      <p className="mt-3 text-xs text-zinc-500">
-        Confidence: {(primary.confidence * 100).toFixed(0)}%
-      </p>
+      <ConfidenceBand
+        finalGrade={primary.final}
+        confidence={primary.confidence}
+      />
       <DamageHeatmap regions={cert.regions} />
     </section>
   );
@@ -324,6 +391,60 @@ function GradeStat({
         {display}
       </p>
     </div>
+  );
+}
+
+/**
+ * Confidence band — replaces the bare "Confidence: NN%" string.
+ *
+ * Heuristic (intentional, not statistically calibrated):
+ *
+ *   width = (1 - confidence) * 2 grade units
+ *
+ * which gives:
+ *   - 100% confidence → ±0.0 (single point)
+ *   - 50%  confidence → ±1.0 (a 2-grade window)
+ *   - 0%   confidence → ±2.0 (a 4-grade window)
+ *
+ * We clamp to the canonical 1-10 PSA grade range so the band can't
+ * report e.g. "0.5 to 11.5" on noisy edge cases. The width formula is
+ * a stand-in until we have a real conformal-prediction calibration set
+ * — see TODO.md for the recalibration follow-up. Documenting the
+ * heuristic on the page itself would dilute the message; we keep that
+ * disclosure to the README + this comment.
+ *
+ * Why this matters: TAG Grading (and PSA, BGS, SGC) publish a single
+ * point grade. Showing a band is honest about the model's uncertainty
+ * without dumping a raw percentage on the user. It's a positioning
+ * differentiator, not just a UI tweak.
+ */
+function ConfidenceBand({
+  finalGrade,
+  confidence,
+}: {
+  finalGrade: number | null;
+  confidence: number;
+}) {
+  if (finalGrade === null) {
+    return (
+      <p className="mt-3 text-xs text-zinc-500">
+        Confidence: {(confidence * 100).toFixed(0)}% (final grade pending)
+      </p>
+    );
+  }
+  const width = (1 - confidence) * 2;
+  const lower = Math.max(1, Math.min(10, finalGrade - width));
+  const upper = Math.max(1, Math.min(10, finalGrade + width));
+  const pct = (confidence * 100).toFixed(0);
+  return (
+    <p className="mt-3 text-xs text-zinc-400">
+      Final grade{" "}
+      <span className="text-zinc-200">{finalGrade.toFixed(1)}</span> (likely{" "}
+      <span className="text-zinc-200">
+        {lower.toFixed(1)}–{upper.toFixed(1)}
+      </span>{" "}
+      at {pct}% confidence)
+    </p>
   );
 }
 
