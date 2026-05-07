@@ -68,6 +68,14 @@ Counterfeit ensemble is now **7/7 wired** end-to-end (FFT rosette + color profil
 
 ## Now — code-tractable, high personal utility
 
+- [ ] **Fix alembic migration — enum double-creation on fresh DB** (XS)
+  - `alembic upgrade head` fails on a fresh DB with `type "game" already exists`. Cause: enums in `apps/api/alembic/versions/20260428_0001_initial_schema.py` are constructed with `create_type=True` *and* explicitly created via `enum.create(bind, checkfirst=True)`. When the same `postgresql.ENUM(...)` instance is later referenced inside `op.create_table(sa.Column(..., game_enum, ...))`, SQLAlchemy emits a second `CREATE TYPE` without `IF NOT EXISTS`. Tests bypass alembic via `Base.metadata.create_all` (see `apps/api/tests/conftest.py`), so this has been latent since the migration landed.
+  - Fix: pass `create_type=False` to all five `postgresql.ENUM(...)` constructors at lines 65–75; the explicit `enum.create(bind, checkfirst=True)` loop at 77–84 is the only intended creation site. Smoke: drop `grader` DB, `alembic upgrade head`, confirm clean upgrade.
+  - Personal-use rationale: low (one-time bootstrap), but the workaround (`Base.metadata.create_all`) skips the alembic version table, so any subsequent migration that ships will need a manual `alembic stamp head` first. Worth fixing once, while the bug is fresh.
+
+- [ ] **Home-page CTA → /grade** (XS)
+  - `apps/web/app/page.tsx` is pure marketing — no nav links anywhere. The only entry point to the wizard is typing `/grade` in the URL. Add a "Start grading" button below the headline that links to `/grade`. Five-minute fix; meaningful friction reduction every time you grade a card.
+
 - [ ] **TCGplayer pricing comps on the cert** (M)
   - Free-tier API, simpler than eBay. Shows current market price for the identified variant on the cert page.
   - Lookup keyed on `(IdentifiedCard.{set, number, name}, primary.final)` → pulls "current market price" + maybe "median price by grade." Cache aggressively (24-hour TTL — these don't move that fast).

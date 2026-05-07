@@ -1,6 +1,6 @@
 # Project state — handoff snapshot (2026-05-07)
 
-Single-file orientation doc for picking up a fresh chat session. Pairs with [TODO.md](TODO.md) (active list) and [docs/roadmap.md](docs/roadmap.md) (full operational + shipped log).
+Single-file orientation doc for picking up a fresh chat session. Pairs with [TODO.md](TODO.md) (active list) and [docs/roadmap.md](docs/roadmap.md) (full operational + shipped log). README has the public-facing intro + working dev quick-start: [README.md](README.md).
 
 ---
 
@@ -126,6 +126,31 @@ Per-step rc surfaced in `~/psa_data/launchd.stdout.log`. Plist hands off to `dai
 | Identification trainer | ⚠️ Skeleton; supervised metric learning unblocked, awaits real run |
 | Detection trainer | ⚠️ Skeleton; manifest regen + GPU run pending |
 | Counterfeit threshold recalibration | ⚠️ Tool ready; needs ~300 labeled cards |
+| Alembic migration (fresh-DB) | ❌ Broken: enum double-creation in `0001_initial_schema.py`; bypass via `Base.metadata.create_all` |
+| Clerk dev-mode fallback (web) | ✅ Now genuinely no-ops when key unset (was broken in v5+; fixed 2026-05-07) |
+
+---
+
+## Local dev — actually running on Windows (2026-05-07)
+
+End-to-end dev stack confirmed working on this Windows box. Full recipe in [README.md § Quick start](README.md#quick-start-local-dev). Quick reference:
+
+| Service | Port | Container / process |
+|---|---|---|
+| Postgres + pgvector | 5432 | `docker-postgres-1` |
+| Redis | 6379 | `docker-redis-1` |
+| MinIO (S3 substitute) | 9000 / 9001 console | `docker-minio-1` (login `grader` / `gradergrader`) |
+| FastAPI / uvicorn | 8000 | `python -m uv run --project apps/api ... uvicorn grader.main:app` |
+| Celery worker | (broker on 6379) | `... celery -A grader.workers.celery_app worker --pool=solo` (Windows needs `--pool=solo`) |
+| Next.js | 3000 | `cd apps/web && npm run dev` (npm fine; `--legacy-peer-deps` on install) |
+
+Entry point for grading: **http://localhost:3000/grade** — the home page (`/`) has no nav, type the URL directly.
+
+Two latent bugs surfaced and were patched in the same session:
+- Alembic migration fails on fresh DB; bootstrapped via `Base.metadata.create_all` instead. Migration fix is in [TODO.md](TODO.md) "Now" section.
+- `apps/web/middleware.ts` + `apps/web/app/layout.tsx` claimed to no-op when Clerk key is missing — they didn't, under @clerk/nextjs v5+. Both now genuinely short-circuit, preserving the documented fallback. Prod behavior unchanged.
+
+Identification will return `None` on this Windows box (no `~/manufacturer_refs/reference_embeddings.npz` synced from the Mac yet) — the cert still renders, just with the amber "preliminary" banner and no card name. Centering / edges / counterfeit detectors that don't need a catalog still run.
 
 ---
 
@@ -216,6 +241,8 @@ Stripe, marketplace, kiosks, slabbing, formal SLO+PagerDuty, multi-tenant rate-l
 
 ## How to run things
 
+### Tests
+
 ```bash
 # ml/ tests (Windows venv)
 cd ml && .venv/Scripts/python.exe -m pytest -q
@@ -226,12 +253,37 @@ python -m uv run --project apps/api pytest apps/api/tests -q -m "not requires_po
 # apps/api tests with Postgres on localhost:5432
 python -m uv run --project apps/api pytest apps/api/tests -q
 
-# apps/web type-check (Windows; pnpm may need npm install --legacy-peer-deps fallback)
-cd apps/web && pnpm tsc --noEmit
+# apps/web type-check (Windows; npm + --legacy-peer-deps fallback works)
+cd apps/web && npm run typecheck   # or: pnpm tsc --noEmit
 
 # apps/web tests
-cd apps/web && pnpm test
+cd apps/web && npm test            # or: pnpm test
+```
 
+### Local dev stack (full recipe in README)
+
+```bash
+# Infra
+docker compose -f infra/docker/docker-compose.dev.yml up -d
+
+# Schema bootstrap (alembic broken on fresh DB; see Local dev section above)
+python -m uv run --project apps/api --directory apps/api python -c "import asyncio; from sqlalchemy import text; from sqlalchemy.ext.asyncio import create_async_engine; from grader.db.models import Base; \
+asyncio.run((lambda: (lambda e: __import__('asyncio').get_event_loop().run_until_complete((e.dispose())))(create_async_engine('postgresql+asyncpg://grader:grader@localhost:5432/grader')))())"
+# (a runnable multi-line version is in README — the one-liner above is illustrative)
+
+# API
+python -m uv run --project apps/api --directory apps/api uvicorn grader.main:app --host 127.0.0.1 --port 8000
+
+# Worker (Windows: --pool=solo)
+python -m uv run --project apps/api --directory apps/api celery -A grader.workers.celery_app worker --loglevel=info --pool=solo
+
+# Web
+cd apps/web && npm run dev
+```
+
+### Operational
+
+```bash
 # Full daily flywheel smoke (from repo root, on Mac)
 PROJECT_ROOT="$PWD" ml/scripts/daily_cycle.sh
 
