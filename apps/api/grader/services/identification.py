@@ -14,6 +14,7 @@ detection + dewarp persists `canonical/<kind>.png`. The function:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 
@@ -26,7 +27,16 @@ from pipelines.identification import (
     CatalogIndex,
     IdentificationResult,
     ImageEmbedder,
-    identify,
+)
+from pipelines.identification.hashing import compute_phash
+from pipelines.identification.identify import (
+    EMBEDDING_DEFAULT_TOP_K,
+    MIN_ACCEPT_CONFIDENCE,
+    PHASH_EXACT_MAX_DIST,
+    PHASH_NEAR_MAX_DIST,
+    _calibrate_confidence,
+    _candidate_from_phash,
+    _merge_and_rank,
 )
 
 
@@ -39,6 +49,66 @@ class IdentificationOutcome:
 
 class IdentificationFailedError(Exception):
     pass
+
+
+async def _identify_async(
+    image: np.ndarray,
+    catalog: CatalogIndex,
+    embedder: ImageEmbedder,
+) -> IdentificationResult:
+    """Async port of `pipelines.identification.identify.identify`.
+    Calls the catalog's native async methods so we don't cross-loop
+    its asyncpg connections."""
+    # The catalog Protocol type hint is sync; we cast to the concrete
+    # PgVectorCatalogIndex via runtime access to its `_…_async` methods.
+    cat = catalog
+    if image.dtype != np.uint8:
+        raise ValueError(f"expected uint8 image, got {image.dtype}")
+
+    phash = compute_phash(image)
+    phash_hits = await cat._find_by_phash_async(  # type: ignore[attr-defined]
+        phash, max_distance=PHASH_NEAR_MAX_DIST, limit=EMBEDDING_DEFAULT_TOP_K * 2
+    )
+
+    if phash_hits and phash_hits[0].distance <= PHASH_EXACT_MAX_DIST:
+        cand = _candidate_from_phash(phash_hits[0])
+        return IdentificationResult(
+            candidates=[cand], chosen=cand, confidence=cand.score
+        )
+
+    # Embedder.encode is a synchronous DinoV2 forward pass — bounce
+    # to a thread so it doesn't block the event loop.
+    embedding = await asyncio.to_thread(embedder.encode, image)
+    embedding_hits = await cat._nearest_by_embedding_async(  # type: ignore[attr-defined]
+        embedding, top_k=EMBEDDING_DEFAULT_TOP_K
+    )
+
+    candidates = _merge_and_rank(phash_hits, embedding_hits)[
+        :EMBEDDING_DEFAULT_TOP_K
+    ]
+    if not candidates:
+        return IdentificationResult(
+            candidates=[],
+            chosen=None,
+            confidence=0.0,
+            submitted_embedding=embedding,
+        )
+
+    chosen = candidates[0]
+    confidence = _calibrate_confidence(chosen, candidates)
+    if confidence < MIN_ACCEPT_CONFIDENCE:
+        return IdentificationResult(
+            candidates=candidates,
+            chosen=None,
+            confidence=confidence,
+            submitted_embedding=embedding,
+        )
+    return IdentificationResult(
+        candidates=candidates,
+        chosen=chosen,
+        confidence=confidence,
+        submitted_embedding=embedding,
+    )
 
 
 def _load_canonical_bgr(s3_key: str) -> np.ndarray:
@@ -68,7 +138,15 @@ async def identify_canonical_for_submission(
     around this call (audit log, submission update, downstream stage
     inputs)."""
     image = _load_canonical_bgr(canonical_s3_key)
-    result = identify(image, catalog=catalog, embedder=embedder)
+    # We can't call the sync `identify(...)` here because its catalog
+    # wrappers spawn `asyncio.run(...)` for the DB calls, and those new
+    # loops can't share asyncpg connections with the worker's main
+    # loop. Bouncing through `asyncio.to_thread` doesn't fix it either
+    # (the new thread's loop still isn't where the asyncpg engine
+    # lives). So drive the identification flow async, calling the
+    # catalog's private async methods directly. The compute-heavy bits
+    # (embedder.encode) get bumped to a thread pool.
+    result = await _identify_async(image, catalog=catalog, embedder=embedder)
 
     submission = await db.get(Submission, submission_id)
     if submission is None:

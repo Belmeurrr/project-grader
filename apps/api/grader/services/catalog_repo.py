@@ -88,7 +88,12 @@ class PgVectorCatalogIndex:
             raise ValueError(f"phash {phash} out of unsigned 64-bit range")
         signed = unsigned_to_signed_64(phash)
 
-        # bit_count on bigint XOR gives Hamming distance regardless of sign.
+        # Hamming distance via bit_count on the XOR. Postgres 14+ ships
+        # bit_count(bytea) and bit_count(bit) — there is NO
+        # bit_count(bigint), so we have to cast the XOR result. We
+        # bitand-mask to 64 bits first because Postgres's `#` operator
+        # returns a signed bigint that the `bit(64)` cast won't accept
+        # negative values for.
         sql = text(
             """
             SELECT
@@ -97,11 +102,15 @@ class PgVectorCatalogIndex:
               cv.canonical_phash,
               cv.canonical_image_embedding,
               cv.metadata,
-              bit_count(cv.canonical_phash # :probe) AS distance
+              bit_count(
+                ((cv.canonical_phash # :probe)::bit(64))::varbit
+              ) AS distance
             FROM card_variants cv
             JOIN card_sets cs ON cs.id = cv.set_id
             WHERE cv.canonical_phash IS NOT NULL
-              AND bit_count(cv.canonical_phash # :probe) <= :max_distance
+              AND bit_count(
+                ((cv.canonical_phash # :probe)::bit(64))::varbit
+              ) <= :max_distance
             ORDER BY distance ASC
             LIMIT :limit
             """
