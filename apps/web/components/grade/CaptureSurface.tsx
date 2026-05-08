@@ -1,37 +1,35 @@
 /**
  * Capture surface — wizard's per-shot viewfinder + actions.
  *
- * Clean rebuild. Lessons from the previous attempt:
+ * MVP. Strip-back rebuild: smallest thing that captures a card and
+ * uploads it. Auto-detection / OpenCV lock-on / haptics / countdown
+ * rings are all temporarily gone — they were creating compounding bugs
+ * (six useEffects fighting over `stream`, rAF detector that didn't
+ * actually detect frozen frames, OpenCV blocking the main thread).
  *
- * - Tap targets MUST live outside the viewfinder. The PoseGuide SVG +
- *   CoachingBanner + DetectedQuad polygon all sit inside the viewfinder
- *   and any one of them can intercept clicks if pointer-events isn't set
- *   right. The Enable camera / Take photo / etc. buttons live in the
- *   action row below the viewfinder where nothing can overlay them.
+ * Rebuild plan: get this rock-solid, commit, then re-add features one at
+ * a time behind clearly delimited state, each verified before the next:
+ *   1. Live polygon overlay (cosmetic, OpenCV behind feature flag)
+ *   2. Auto-capture w/ lock detection
+ *   3. Haptic / audio feedback
  *
- * - Camera acquisition is gated behind an explicit user-gesture button
- *   tap. iOS Safari (17+) silently no-ops getUserMedia outside a gesture.
+ * State machine (one truth, easy to read):
+ *   idle           — no stream yet; show "Enable camera" button
+ *   live           — stream attached, video playing; show Take photo
+ *   preview        — captured blob staged; show Use this / Retake
+ *   uploading      — mid-upload to API; show spinner
+ *   passed/failed  — server verdict; show readout (parent state)
+ *   cameraError    — getUserMedia rejected; show error + retry button
  *
- * - Stream + video element are tracked as React state so the attach
- *   effect can fire on either changing — useRef alone misses remounts.
- *
- * - No visibility-stop-on-hidden handler. It races with iOS permission
- *   prompts (which can briefly transition the page to "hidden") and
- *   kills streams just before they're handed back. If a backgrounded
- *   stream goes black on return, the user can tap "Restart camera".
- *
- * Features kept from the OpenCV / coaching work:
- *   - Live quad detection via Canny + findContours + approxPolyDP
- *   - Polygon overlay with corner dots
- *   - Coaching banner with directional hints
- *   - Auto-capture (4 framed ticks → fires)
- *   - Auto-crop on capture (re-detects on the snapped frame so the
- *     crop is current, not 250ms-stale)
+ * Recovery: when the page transitions from hidden→visible after >500ms
+ * (i.e. a real app-switch, not a momentary permission overlay), we kill
+ * the stream and reset to "idle". User taps Enable camera once to
+ * revive — guaranteed-fresh user gesture, never a stale frozen frame.
  */
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   ApiError,
@@ -40,13 +38,6 @@ import {
   type ShotOut,
   uploadShot,
 } from "@/lib/submission";
-import {
-  detectCardQuad,
-  isOpenCVReady,
-  loadOpenCV,
-  quadBounds,
-  type Quad,
-} from "@/lib/cardDetect";
 import { PoseGuide } from "@/components/grade/PoseGuide";
 import type { WizardShot } from "@/components/grade/shots";
 
@@ -66,15 +57,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-interface Detection {
-  quad: Quad | null;
-  framed: boolean;
-  hint: string;
-}
-
-const TICK_MS = 250;
-const FIRE_THRESHOLD = 4; // 4 framed ticks ≈ 1.0s before auto-fire
-const SETTLE_MS = 220; // delay between tap and shutter to let hand jiggle settle
+const SETTLE_MS = 220;
 
 export function CaptureSurface({
   submissionId,
@@ -90,13 +73,7 @@ export function CaptureSurface({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [autoMode, setAutoMode] = useState(false);
   const [videoAspect, setVideoAspect] = useState<number | null>(null);
-  const [detection, setDetection] = useState<Detection>({
-    quad: null,
-    framed: false,
-    hint: "",
-  });
 
   // Reset preview when the wizard switches to a different shot.
   useEffect(() => {
@@ -104,23 +81,15 @@ export function CaptureSurface({
     setPreviewBlob(null);
   }, [shot.kind]);
 
-  // Stop tracks on full unmount (page close / wizard exit).
+  // Stop tracks on unmount (page exit).
   useEffect(() => {
     return () => {
       stream?.getTracks().forEach((t) => t.stop());
     };
   }, [stream]);
 
-  // Lazy-load OpenCV.js *after* the camera is up. Eager loading on mount
-  // was blocking the main thread (10MB WASM compile) at the moment the
-  // user taps Enable camera, which on iOS Safari makes the gesture
-  // context expire silently and getUserMedia never runs.
-  useEffect(() => {
-    if (!stream) return;
-    void loadOpenCV().catch(() => {});
-  }, [stream]);
-
-  // Attach stream → video element. Single source of truth for srcObject.
+  // Single attach effect — when both the video element and the stream
+  // are available, wire them together and start playback.
   useEffect(() => {
     if (!videoEl || !stream) return;
     if (videoEl.srcObject !== stream) videoEl.srcObject = stream;
@@ -128,8 +97,8 @@ export function CaptureSurface({
     if (p && typeof p.catch === "function") p.catch(() => {});
   }, [videoEl, stream]);
 
-  // Pull video aspect ratio from the track settings (more reliable on
-  // iOS than waiting for loadedmetadata).
+  // Pull aspect ratio from the track settings — more reliable on iOS
+  // than waiting for the loadedmetadata DOM event.
   useEffect(() => {
     if (!stream) return;
     const track = stream.getVideoTracks()[0];
@@ -139,93 +108,29 @@ export function CaptureSurface({
     }
   }, [stream]);
 
-  // Live OpenCV detection tick — only runs while the camera is live and
-  // we're not showing a preview. Updates the polygon overlay and the
-  // coaching hint, and triggers the auto-fire when framed steadily.
-  const captureRef = useRef<() => Promise<void>>(async () => {});
+  // Reliable backgrounding recovery. iOS keeps tracks "live" even
+  // when the actual frame data has stopped flowing, so we don't try
+  // to introspect — we just kill on any non-trivial hidden interval
+  // and let the user tap Enable camera to get a fresh stream.
   useEffect(() => {
-    if (!stream || !videoEl || previewUrl || cameraError) return;
-    const W = 320;
-    const H = 240;
-    const canvas = document.createElement("canvas");
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
-    let framedTicks = 0;
-    let cancelled = false;
-
-    const tick = () => {
-      if (cancelled) return;
-      if (videoEl.readyState < 2) return;
-      if (!isOpenCVReady()) {
-        setDetection({ quad: null, framed: false, hint: "Loading detector…" });
-        return;
-      }
-      ctx.drawImage(videoEl, 0, 0, W, H);
-      const data = ctx.getImageData(0, 0, W, H);
-      let quad: Quad | null = null;
-      try {
-        quad = detectCardQuad(data);
-      } catch {
-        quad = null;
-      }
-      if (!quad) {
-        framedTicks = 0;
-        setDetection({
-          quad: null,
-          framed: false,
-          hint: "Move closer — fit the card in the brackets",
-        });
-        return;
-      }
-      const b = quadBounds(quad, W, H);
-      const fill = b.w * b.h;
-      const cx = b.x + b.w / 2;
-      const cy = b.y + b.h / 2;
-      const sizeOk = fill > 0.18 && fill < 0.85;
-      const centered =
-        Math.abs(cx - 0.5) < 0.18 && Math.abs(cy - 0.5) < 0.18;
-      const allGood = sizeOk && centered;
-
-      let hint: string;
-      if (allGood) {
-        hint = autoMode
-          ? "Locked — capturing"
-          : "Card framed — tap Take photo";
-      } else if (fill < 0.18) {
-        hint = "Move closer";
-      } else if (fill > 0.85) {
-        hint = "Pull back a little";
-      } else if (!centered) {
-        const dx = cx - 0.5;
-        const dy = cy - 0.5;
-        hint =
-          Math.abs(dx) > Math.abs(dy)
-            ? dx > 0
-              ? "Pan right"
-              : "Pan left"
-            : dy > 0
-              ? "Pan down"
-              : "Pan up";
-      } else {
-        hint = "Hold steady";
-      }
-      setDetection({ quad, framed: allGood, hint });
-
-      if (allGood) framedTicks += 1;
-      else framedTicks = 0;
-      if (autoMode && framedTicks >= FIRE_THRESHOLD) {
-        cancelled = true;
-        void captureRef.current();
+    if (!stream) return;
+    let hiddenAt: number | null = null;
+    const handleVis = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+      } else if (document.visibilityState === "visible") {
+        const dur = hiddenAt ? Date.now() - hiddenAt : 0;
+        hiddenAt = null;
+        if (dur > 500) {
+          stream.getTracks().forEach((t) => t.stop());
+          setStream(null);
+          setVideoAspect(null);
+        }
       }
     };
-    const handle = window.setInterval(tick, TICK_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(handle);
-    };
-  }, [stream, videoEl, previewUrl, cameraError, autoMode]);
+    document.addEventListener("visibilitychange", handleVis);
+    return () => document.removeEventListener("visibilitychange", handleVis);
+  }, [stream]);
 
   // -- Handlers -------------------------------------------------------
 
@@ -257,67 +162,25 @@ export function CaptureSurface({
     stream?.getTracks().forEach((t) => t.stop());
     setStream(null);
     setVideoAspect(null);
-    setDetection({ quad: null, framed: false, hint: "" });
+    setCameraError(null);
     await requestCamera();
   };
 
   const captureFromVideo = useCallback(async () => {
     if (!videoEl || videoEl.readyState < 2) return;
+    // Brief settle so a tap-induced jiggle doesn't end up baked in.
     await new Promise((r) => setTimeout(r, SETTLE_MS));
     if (!videoEl || videoEl.readyState < 2) return;
-    const fullW = videoEl.videoWidth;
-    const fullH = videoEl.videoHeight;
-
-    // Re-detect on the just-snapped frame (not the live overlay's
-    // 250ms-stale rect) so the crop reflects where the card is now.
-    let sx = 0;
-    let sy = 0;
-    let sw = fullW;
-    let sh = fullH;
-    if (isOpenCVReady()) {
-      const probeW = 320;
-      const probeH = 240;
-      const probe = document.createElement("canvas");
-      probe.width = probeW;
-      probe.height = probeH;
-      const pctx = probe.getContext("2d", { willReadFrequently: true });
-      if (pctx) {
-        pctx.drawImage(videoEl, 0, 0, probeW, probeH);
-        try {
-          const q = detectCardQuad(pctx.getImageData(0, 0, probeW, probeH));
-          if (q) {
-            const b = quadBounds(q, probeW, probeH);
-            const margin = 0.12;
-            const nx = Math.max(0, b.x - margin);
-            const ny = Math.max(0, b.y - margin);
-            const nw = Math.min(1 - nx, b.w + 2 * margin);
-            const nh = Math.min(1 - ny, b.h + 2 * margin);
-            const px = Math.round(nx * fullW);
-            const py = Math.round(ny * fullH);
-            const pw = Math.round(nw * fullW);
-            const ph = Math.round(nh * fullH);
-            if (pw >= 320 && ph >= 320) {
-              sx = px;
-              sy = py;
-              sw = pw;
-              sh = ph;
-            }
-          }
-        } catch {
-          // Detection failed; ship full frame.
-        }
-      }
-    }
 
     const canvas = document.createElement("canvas");
-    canvas.width = sw;
-    canvas.height = sh;
+    canvas.width = videoEl.videoWidth;
+    canvas.height = videoEl.videoHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       onError("Could not get 2D context.");
       return;
     }
-    ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, sw, sh);
+    ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
     const blob = await new Promise<Blob | null>((res) =>
       canvas.toBlob((b) => res(b), "image/jpeg", 0.92),
     );
@@ -328,12 +191,6 @@ export function CaptureSurface({
     setPreviewBlob(blob);
     setPreviewUrl(URL.createObjectURL(blob));
   }, [videoEl, onError]);
-
-  // Keep captureRef pointing at the latest captureFromVideo so the
-  // tick effect's auto-fire path always invokes the current closure.
-  useEffect(() => {
-    captureRef.current = captureFromVideo;
-  }, [captureFromVideo]);
 
   const captureFromFile = (file: File) => {
     setPreviewBlob(file);
@@ -400,10 +257,10 @@ export function CaptureSurface({
           border: "1px solid var(--line-2)",
         }}
       >
-        {showPreview && (
+        {showPreview && previewUrl && (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={previewUrl ?? undefined}
+            src={previewUrl}
             alt="Captured shot preview"
             style={{
               position: "absolute",
@@ -443,16 +300,11 @@ export function CaptureSurface({
             start the live feed.
           </CenteredOverlay>
         )}
-        {showError && <CenteredOverlay tone="error">{cameraError}</CenteredOverlay>}
-        {/* Cosmetic overlays — all pointer-events: none so they never
-            steal taps from anything underneath. */}
+        {showError && (
+          <CenteredOverlay tone="error">{cameraError}</CenteredOverlay>
+        )}
+        {/* Cosmetic framing brackets only — pointer-events: none. */}
         <PoseGuide pose={shot.pose} guideColor="rgba(190,242,100,0.6)" />
-        {showVideo && detection.quad && (
-          <DetectedQuad quad={detection.quad} framed={detection.framed} />
-        )}
-        {showVideo && detection.hint && (
-          <CoachingBanner hint={detection.hint} framed={detection.framed} />
-        )}
       </div>
 
       {/* Action row — buttons live OUTSIDE the viewfinder so no overlay
@@ -469,8 +321,6 @@ export function CaptureSurface({
         />
       ) : (
         <LiveActions
-          autoMode={autoMode}
-          onToggleAuto={() => setAutoMode((v) => !v)}
           onCapture={captureFromVideo}
           onFile={captureFromFile}
           onRestart={restartCamera}
@@ -552,38 +402,34 @@ function EnableCameraRow({
 }
 
 function LiveActions({
-  autoMode,
-  onToggleAuto,
   onCapture,
   onFile,
   onRestart,
 }: {
-  autoMode: boolean;
-  onToggleAuto: () => void;
   onCapture: () => void;
   onFile: (f: File) => void;
   onRestart: () => void;
 }) {
   return (
     <div
-      style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: 8,
+      }}
     >
       <button
         type="button"
         onClick={onCapture}
         className="pg-btn pg-btn-primary"
-        style={{ padding: "12px 20px", fontSize: 14, touchAction: "manipulation" }}
+        style={{
+          padding: "12px 20px",
+          fontSize: 14,
+          touchAction: "manipulation",
+        }}
       >
         Take photo
-      </button>
-      <button
-        type="button"
-        onClick={onToggleAuto}
-        className={`pg-btn ${autoMode ? "pg-btn-primary" : "pg-btn-ghost"}`}
-        aria-pressed={autoMode}
-        style={{ touchAction: "manipulation" }}
-      >
-        {autoMode ? "Auto: on" : "Auto: off"}
       </button>
       <FilePickerLabel onFile={onFile} />
       <button
@@ -630,7 +476,11 @@ function PreviewActions({
         type="button"
         onClick={onAccept}
         className="pg-btn pg-btn-primary"
-        style={{ padding: "12px 20px", fontSize: 14, touchAction: "manipulation" }}
+        style={{
+          padding: "12px 20px",
+          fontSize: 14,
+          touchAction: "manipulation",
+        }}
       >
         Use this
       </button>
@@ -736,98 +586,6 @@ function FailedReadout({ reasons }: { reasons: string[] }) {
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-function DetectedQuad({ quad, framed }: { quad: Quad; framed: boolean }) {
-  const stroke = framed ? "rgba(190,242,100,0.95)" : "rgba(251,191,36,0.9)";
-  const W = 320;
-  const H = 240;
-  const points = quad.map((p) => `${p.x / W},${p.y / H}`).join(" ");
-  return (
-    <svg
-      aria-hidden
-      style={{
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-      }}
-      viewBox="0 0 1 1"
-      preserveAspectRatio="none"
-    >
-      <polygon
-        points={points}
-        fill={framed ? "rgba(190,242,100,0.08)" : "none"}
-        stroke={stroke}
-        strokeWidth={3}
-        strokeLinejoin="round"
-        vectorEffect="non-scaling-stroke"
-        style={{ transition: "stroke 120ms ease" }}
-      />
-      {quad.map((p, i) => (
-        <circle
-          key={i}
-          cx={p.x / W}
-          cy={p.y / H}
-          r={0.012}
-          fill={stroke}
-          vectorEffect="non-scaling-stroke"
-        />
-      ))}
-    </svg>
-  );
-}
-
-function CoachingBanner({
-  hint,
-  framed,
-}: {
-  hint: string;
-  framed: boolean;
-}) {
-  const lower = hint.toLowerCase();
-  let icon = "📷";
-  if (lower.startsWith("move closer")) icon = "⬇️";
-  else if (lower.startsWith("pull back")) icon = "⬆️";
-  else if (lower.startsWith("pan left")) icon = "←";
-  else if (lower.startsWith("pan right")) icon = "→";
-  else if (lower.startsWith("pan up")) icon = "↑";
-  else if (lower.startsWith("pan down")) icon = "↓";
-  else if (lower.includes("framed") || lower.includes("locked")) icon = "✓";
-  else if (lower.includes("hold steady")) icon = "✋";
-  return (
-    <div
-      style={{
-        position: "absolute",
-        top: 12,
-        left: "50%",
-        transform: "translateX(-50%)",
-        background: framed ? "rgba(40,80,20,0.92)" : "rgba(0,0,0,0.78)",
-        color: framed ? "#d8fa6c" : "#fff",
-        padding: "8px 14px",
-        borderRadius: 12,
-        fontSize: 13,
-        fontWeight: 600,
-        border: framed
-          ? "2px solid rgba(190,242,100,0.85)"
-          : "1px solid rgba(255,255,255,0.2)",
-        boxShadow: framed
-          ? "0 4px 16px rgba(190,242,100,0.25)"
-          : "0 4px 16px rgba(0,0,0,0.5)",
-        maxWidth: "88%",
-        textAlign: "center",
-        pointerEvents: "none",
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        whiteSpace: "nowrap",
-      }}
-    >
-      <span style={{ fontSize: 16, flexShrink: 0 }}>{icon}</span>
-      <span>{hint}</span>
     </div>
   );
 }
