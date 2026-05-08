@@ -108,6 +108,12 @@ export function CaptureSurface({
     }
   }, [stream]);
 
+  // [OpenCV loading + auto-crop removed for now — even loading-only
+  // (no live tick) blocks the main thread during the WASM compile
+  // long enough to queue user taps. Will re-add via a Web Worker so
+  // the compile can't choke the page. Manual capture still works;
+  // server-side detector runs against whatever frame we ship.]
+
   // Reliable backgrounding recovery. iOS keeps tracks "live" even
   // when the actual frame data has stopped flowing, so we don't try
   // to introspect — we just kill on any non-trivial hidden interval
