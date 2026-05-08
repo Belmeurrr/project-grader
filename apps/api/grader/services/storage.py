@@ -87,6 +87,10 @@ def shot_s3_key(
 
 @lru_cache(maxsize=1)
 def _s3_client():
+    """Boto3 client configured with the *internal* S3 endpoint — the URL
+    the API server itself uses to call head_object/get_object/etc. In
+    dev this is typically http://localhost:9000 so server-side calls go
+    direct to MinIO, no proxy in the path."""
     s = get_settings()
     return boto3.client(
         "s3",
@@ -101,9 +105,34 @@ def _s3_client():
     )
 
 
+@lru_cache(maxsize=1)
+def _presign_client():
+    """Boto3 client configured with the *public-facing* S3 endpoint — the
+    URL the browser will hit when uploading via the presigned POST. In
+    deployments where the bucket is fronted by a proxy (Tailscale Serve,
+    a CDN, an ingress) the public hostname differs from what the API
+    uses internally; presigned URLs must be signed against the public
+    one or signature validation fails when the browser uploads.
+    Defaults to the same endpoint as ``_s3_client`` if no override."""
+    s = get_settings()
+    public = s.s3_public_endpoint_url or s.s3_endpoint_url
+    return boto3.client(
+        "s3",
+        region_name=s.s3_region,
+        endpoint_url=public,
+        aws_access_key_id=s.s3_access_key_id,
+        aws_secret_access_key=s.s3_secret_access_key,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path" if s.s3_force_path_style else "auto"},
+        ),
+    )
+
+
 def reset_s3_client_cache() -> None:
-    """Clear the cached client. Used by tests that override settings."""
+    """Clear cached clients. Used by tests that override settings."""
     _s3_client.cache_clear()
+    _presign_client.cache_clear()
 
 
 def presigned_post_for_shot(
@@ -129,7 +158,7 @@ def presigned_post_for_shot(
     # surfaces on the client's PUT as an opaque 403. Wrapping the call
     # surfaces that earlier as a 503 with a retry hint.
     try:
-        response = _s3_client().generate_presigned_post(
+        response = _presign_client().generate_presigned_post(
             Bucket=settings.s3_bucket,
             Key=key,
             Fields={"Content-Type": content_type},
@@ -185,7 +214,7 @@ def presigned_get_for_canonical(
     router for the trade-off)."""
     settings = get_settings()
     try:
-        url = _s3_client().generate_presigned_url(
+        url = _presign_client().generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.s3_bucket, "Key": s3_key},
             ExpiresIn=expires_in_seconds,

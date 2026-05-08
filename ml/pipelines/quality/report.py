@@ -36,9 +36,21 @@ class QualityThresholds:
     # grader is still strict where it matters — card detection is required,
     # fill-ratio bounds keep zoom honest, glare is unchanged.
     min_blur: float = 90.0
-    max_glare: float = 0.005  # 0.5% of pixels
-    max_perspective_deg: float = 12.0
-    min_fill_ratio: float = 0.40
+    max_glare: float = 0.012  # ~1.2% of pixels — relaxed from 0.005;
+    # foil/glossy trading cards reliably have a small bright sheen even
+    # with diffuse light, and 0.005 was rejecting otherwise-perfect
+    # captures.
+    max_perspective_deg: float = 20.0  # 12° rejected hand-held captures
+    # at moderate tilt; 20° is enough that the YOLO+dewarp head can still
+    # produce a usable canonical, while catching only seriously skewed
+    # shots.
+    # Personal-use grading: client-side auto-crop on capture closely
+    # frames the card before upload, but the server's own detector
+    # often finds a slightly smaller card region within that crop, so
+    # fill on the cropped frame measures ~30-40%. 0.25 is forgiving
+    # enough that a sensibly framed shot passes; 0.95 ceiling stays
+    # the same to catch over-zoomed clipped shots.
+    min_fill_ratio: float = 0.25
     max_fill_ratio: float = 0.95
     require_card_detected: bool = True
 

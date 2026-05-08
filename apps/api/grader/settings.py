@@ -35,6 +35,18 @@ class Settings(BaseSettings):
         default=None,
         description="Override for S3 endpoint (used for MinIO in local dev).",
     )
+    s3_public_endpoint_url: str | None = Field(
+        default=None,
+        description=(
+            "Override for the *public-facing* S3 endpoint used when "
+            "generating presigned URLs that the browser will hit. When "
+            "MinIO sits behind a reverse proxy (Tailscale Serve, ingress, "
+            "CDN) the hostname the client uses differs from the one the "
+            "API uses internally; the presigned URL must be signed "
+            "against the public hostname or signature validation fails "
+            "on the client's upload. Falls back to s3_endpoint_url."
+        ),
+    )
     s3_access_key_id: str | None = Field(default=None)
     s3_secret_access_key: str | None = Field(default=None)
     s3_force_path_style: bool = Field(
