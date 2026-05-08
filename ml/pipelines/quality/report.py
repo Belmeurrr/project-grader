@@ -30,9 +30,14 @@ class QualityThresholds:
     defaults derived from manual inspection of mid-range phone captures.
     """
 
-    min_blur: float = 100.0
+    # Personal-use defaults: relaxed from the original 100 / 8° because a
+    # hand-held capture rig (no tripod, normal indoor light) reliably
+    # produces blur ~70-95 and tilt 5-12° even with a steady setup. The
+    # grader is still strict where it matters — card detection is required,
+    # fill-ratio bounds keep zoom honest, glare is unchanged.
+    min_blur: float = 90.0
     max_glare: float = 0.005  # 0.5% of pixels
-    max_perspective_deg: float = 8.0
+    max_perspective_deg: float = 12.0
     min_fill_ratio: float = 0.40
     max_fill_ratio: float = 0.95
     require_card_detected: bool = True
@@ -99,14 +104,18 @@ def evaluate_shot(
     report.blur = blur_score(image)
     if report.blur < th.min_blur:
         report.passed = False
-        report.reasons.append(f"too_blurry (score {report.blur:.1f} < {th.min_blur})")
+        report.reasons.append(
+            "Image is too blurry — hold the phone steadier and let autofocus settle "
+            "(tap on the card in the viewfinder to lock focus before snapping)."
+        )
 
     if image.ndim == 3 and image.shape[2] == 3:
         report.glare = glare_score(image)
         if report.glare > th.max_glare:
             report.passed = False
             report.reasons.append(
-                f"too_much_glare ({report.glare:.3f} > {th.max_glare})"
+                "Too much glare — diffuse the light or angle the card so reflections "
+                "don't bounce straight into the lens."
             )
 
     card = detect_card_bbox(image)
@@ -114,25 +123,30 @@ def evaluate_shot(
 
     if th.require_card_detected and card is None:
         report.passed = False
-        report.reasons.append("card_not_detected")
+        report.reasons.append(
+            "Couldn't find the card in the frame — place it on a plain, single-color "
+            "background (no patterned mat or tray) and position it inside the guide."
+        )
     elif card is not None:
         report.card_fill = fill_ratio(card, image.shape[:2])
         if report.card_fill < th.min_fill_ratio:
             report.passed = False
             report.reasons.append(
-                f"card_too_small (fill {report.card_fill:.2f} < {th.min_fill_ratio})"
+                "Card is too small in the frame — move closer until its edges sit "
+                "near the guide rectangle."
             )
         elif report.card_fill > th.max_fill_ratio:
             report.passed = False
             report.reasons.append(
-                f"card_too_close (fill {report.card_fill:.2f} > {th.max_fill_ratio})"
+                "Card is too close — pull back slightly so the corners aren't clipped."
             )
 
         report.perspective = perspective_deg(card)
         if report.perspective > th.max_perspective_deg:
             report.passed = False
             report.reasons.append(
-                f"too_off_axis ({report.perspective:.1f}° > {th.max_perspective_deg}°)"
+                "Phone isn't level with the card — keep the lens parallel to the "
+                "surface so the card looks rectangular, not skewed."
             )
 
     return report

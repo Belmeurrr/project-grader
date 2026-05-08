@@ -13,58 +13,48 @@ type Props = { pose: WizardPose; guideColor: string };
 
 export function PoseGuide({ pose, guideColor }: Props) {
   if (pose === "flat") {
+    // Bright corner brackets ("L"-shapes) at the four corners of the target
+    // card region — much more visible than a dashed rectangle and immediately
+    // communicates "fill this area." Pulses gently so it reads even on busy
+    // backgrounds. Subtle inner card silhouette stays for shape reference.
+    const x0 = 130,
+      y0 = 65,
+      x1 = 270,
+      y1 = 255;
+    const armLen = 22;
+    const sw = 4;
+    const c = guideColor;
     return (
       <svg
         aria-hidden
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
         viewBox="0 0 400 300"
         preserveAspectRatio="xMidYMid meet"
       >
-        <rect
-          x="130"
-          y="65"
-          width="140"
-          height="190"
-          rx="6"
-          fill="rgba(190,242,100,0.04)"
-          stroke={guideColor}
-          strokeWidth="1.4"
-          strokeDasharray="6 4"
-        />
-        <rect
-          x="138"
-          y="73"
-          width="124"
-          height="174"
-          rx="4"
-          fill="url(#flatSilhouette)"
-          stroke="var(--ink-3)"
-          strokeWidth="0.5"
-          opacity="0.6"
-        />
-        <defs>
-          <linearGradient id="flatSilhouette" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#3a1a08" />
-            <stop offset="50%" stopColor="#7a3a14" />
-            <stop offset="100%" stopColor="#f97316" stopOpacity="0.6" />
-          </linearGradient>
-        </defs>
-        <line x1="200" y1="155" x2="200" y2="165" stroke={guideColor} strokeWidth="1" />
-        <line x1="195" y1="160" x2="205" y2="160" stroke={guideColor} strokeWidth="1" />
-        <line x1="130" y1="160" x2="125" y2="160" stroke={guideColor} strokeWidth="1.5" />
-        <line x1="270" y1="160" x2="275" y2="160" stroke={guideColor} strokeWidth="1.5" />
-        <line x1="200" y1="65" x2="200" y2="60" stroke={guideColor} strokeWidth="1.5" />
-        <line x1="200" y1="255" x2="200" y2="260" stroke={guideColor} strokeWidth="1.5" />
+        {/* Four L-bracket corners */}
+        <g stroke={c} strokeWidth={sw} fill="none" strokeLinecap="round">
+          <polyline points={`${x0},${y0 + armLen} ${x0},${y0} ${x0 + armLen},${y0}`} />
+          <polyline points={`${x1 - armLen},${y0} ${x1},${y0} ${x1},${y0 + armLen}`} />
+          <polyline points={`${x0},${y1 - armLen} ${x0},${y1} ${x0 + armLen},${y1}`} />
+          <polyline points={`${x1 - armLen},${y1} ${x1},${y1} ${x1},${y1 - armLen}`} />
+          <animate
+            attributeName="opacity"
+            values="0.6;1;0.6"
+            dur="1.6s"
+            repeatCount="indefinite"
+          />
+        </g>
         <text
           x="200"
-          y="50"
+          y="160"
           textAnchor="middle"
           fontFamily="var(--font-geist-mono), monospace"
-          fontSize="7"
-          fill={guideColor}
-          letterSpacing="0.18em"
+          fontSize="9"
+          fill={c}
+          opacity="0.7"
+          letterSpacing="0.22em"
         >
-          FILL THE GUIDE
+          FIT CARD HERE
         </text>
       </svg>
     );
@@ -73,7 +63,7 @@ export function PoseGuide({ pose, guideColor }: Props) {
     return (
       <svg
         aria-hidden
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
         viewBox="0 0 400 300"
         preserveAspectRatio="xMidYMid meet"
       >
@@ -130,7 +120,7 @@ export function PoseGuide({ pose, guideColor }: Props) {
     return (
       <svg
         aria-hidden
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
         viewBox="0 0 400 300"
         preserveAspectRatio="xMidYMid meet"
       >

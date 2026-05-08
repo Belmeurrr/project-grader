@@ -118,6 +118,20 @@ cd apps/web && npm install --legacy-peer-deps && npm run dev
 
 Go directly to **http://localhost:3000/grade** — the home page (`/`) is a marketing landing with no nav links, so typing the URL is currently the only entry point. Walk through the 8 shots; submit; you'll be redirected to `/cert/<id>` when the pipeline finishes.
 
+### 6b. Capture from your phone (Tailscale)
+
+The wizard already speaks the rear camera (`getUserMedia({facingMode:"environment"})`) and falls back to `<input type="file" capture="environment">` so a phone browser is a perfectly good capture device — but only over HTTPS. The committed env files already point at a Tailscale HTTPS hostname; bring up the serve config in a second terminal:
+
+```powershell
+pwsh infra/tailscale/serve-dev.ps1
+# Web:  https://<your-host>.<tailnet>.ts.net/grade
+# API:  https://<your-host>.<tailnet>.ts.net:8443
+```
+
+If your tailnet hostname differs from the one in `apps/web/.env.local` and `apps/api/.env`, update both before starting the API and web. To tear the serve config back down: `pwsh infra/tailscale/serve-dev.ps1 -Stop`.
+
+Open the web URL on your phone (must be signed into the same tailnet), pick the first shot, allow camera access, and shoot.
+
 ## Known dev-setup gotchas
 
 - **Clerk dev fallback** in `apps/web/middleware.ts`, `apps/web/app/layout.tsx`, and `apps/web/lib/submission.ts` short-circuits when `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is unset. `useAuthedFetch` picks one of two implementations at module load (Clerk vs dev-token) so rules-of-hooks stays satisfied. Production behavior unchanged when keys are present.

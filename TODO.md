@@ -121,7 +121,7 @@ Counterfeit ensemble is now **7/7 wired** end-to-end (FFT rosette + color profil
 
 ## Eventually — keep on the list, no rush
 
-- [ ] **Mobile app** — RN/Expo, on-device capture guidance. You shoot from your phone; the web wizard already works on mobile, but a native app would feel cleaner.
+- [ ] **iOS app — Capacitor wrap of the existing wizard** — phone capture works *today* via Tailscale-served HTTPS (see README §6b: `infra/tailscale/serve-dev.ps1`); the wizard already requests rear camera and `<input capture>`. The native step is wrapping `apps/web` with [Capacitor](https://capacitorjs.com/) (or Tauri Mobile) so the same React app ships as a real iOS bundle: native camera plugin replaces `getUserMedia` (better autofocus + RAW access), files PUT to the same API. Cost: Apple Developer account ($99/yr), TestFlight or sideload — App Store review only matters if distributing publicly. RN/Expo would mean re-implementing the wizard; Capacitor avoids that. PWA "Add to Home Screen" is the cheap intermediate.
 - [ ] **eBay sold-listings comp widget on cert** (L) — needs eBay Browse / Marketplace Insights API + cache layer + 130point licensing decision. Bigger lift than TCGplayer; would be a major differentiator vs TAG/PSA but personal-use value is "nice-to-have."
 - [ ] **Terraform dev/prod env** — only needed if/when you decide to host the API somewhere other than your Mac. Currently docker-compose is sufficient.
 - [ ] **Latency SLO + Datadog dashboards** — Sentry covers personal-use observability needs. SLOs matter when paying customers are watching.

@@ -141,14 +141,14 @@ def test_card_too_far_fails_with_size_reason() -> None:
     img = card_in_scene(fill=0.20)
     report = evaluate_shot(img, "front_full")
     assert not report.passed
-    assert any(("too_small" in r) or ("not_detected" in r) for r in report.reasons)
+    assert any(("too small" in r) or ("Couldn't find the card" in r) for r in report.reasons)
 
 
 def test_corner_zoom_uses_relaxed_thresholds() -> None:
     img = card_in_scene(fill=0.30)
     report = evaluate_shot(img, "corner_tl")
     # corner zooms have lower min_fill and don't require detection
-    assert not any("card_too_small" in r for r in report.reasons)
+    assert not any("too small" in r for r in report.reasons)
 
 
 def test_evaluate_shot_rejects_non_uint8() -> None:
